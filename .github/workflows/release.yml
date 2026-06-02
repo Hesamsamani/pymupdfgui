@@ -46,6 +46,7 @@ jobs:
             --collect-all pymupdf `
             --collect-all pymupdf4llm `
             --collect-all pdfplumber `
+            --add-data "icon.png;." `
             --icon icon.ico `
             distilmark_launcher.py
 

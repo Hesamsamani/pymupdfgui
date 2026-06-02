@@ -28,6 +28,8 @@ QMainWindow, QWidget {{ background-color: #0c0e13; color: #e7eaf0; }}
 QFrame#Sidebar {{ background-color: #08090d; border-right: 1px solid #1a1e27; }}
 QLabel#Logo {{ color: #ffffff; font-size: 20px; font-weight: 800; padding: 20px 18px 0 18px; }}
 QLabel#Subtitle {{ color: #6b7280; padding: 2px 18px 18px 18px; font-size: 11px; }}
+QPushButton#Brand {{ background: transparent; border: none; padding: 0; margin: 0; text-align: center; }}
+QPushButton#Brand:hover {{ background: #11151c; }}
 QLabel#SectionLabel {{
     color: #545b6a; font-size: 10px; font-weight: 700;
     padding: 18px 18px 8px 18px; letter-spacing: 1.4px;
@@ -243,6 +245,8 @@ QMainWindow, QWidget {{ background-color: #f6f7fb; color: #1e2230; }}
 QFrame#Sidebar {{ background-color: #ffffff; border-right: 1px solid #e6e8f0; }}
 QLabel#Logo {{ color: #161a26; font-size: 20px; font-weight: 800; padding: 20px 18px 0 18px; }}
 QLabel#Subtitle {{ color: #8a90a0; padding: 2px 18px 18px 18px; font-size: 11px; }}
+QPushButton#Brand {{ background: transparent; border: none; padding: 0; margin: 0; text-align: center; }}
+QPushButton#Brand:hover {{ background: #eef0f6; }}
 QLabel#SectionLabel {{ color: #9aa0b0; font-size: 10px; font-weight: 700; padding: 18px 18px 8px 18px; letter-spacing: 1.4px; }}
 
 QPushButton {{

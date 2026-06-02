@@ -276,8 +276,85 @@ def _icon_add(color: str = "#2563eb") -> QIcon:
     return QIcon(pm)
 
 
+REPO_URL = "https://github.com/Hesamsamani/Distilmark"
+
+
+def _resource_path(name: str) -> Path:
+    """Return the path to a bundled resource (works in dev + frozen .exe)."""
+    if getattr(sys, "frozen", False):
+        # PyInstaller drops resources into sys._MEIPASS
+        base = Path(getattr(sys, "_MEIPASS", "."))
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / name
+
+
+def _brand_pixmap(size: int) -> QPixmap:
+    """Load the high-resolution icon.png (preferred) or fall back to the
+    procedural droplet mark."""
+    p = _resource_path("icon.png")
+    if p.exists():
+        pm = QPixmap(str(p))
+        if not pm.isNull():
+            return pm.scaled(size, size,
+                             Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+    return _brand_mark(size)
+
+
+class _BrandButton(QPushButton):
+    """A flat clickable brand block: big logo on top, wordmark below.
+    Clicking it opens the project repo in the user's browser."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Brand")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFlat(True)
+        self.setMinimumHeight(170)
+        self.setToolTip(f"Open the Distilmark repository in your browser\n{REPO_URL}")
+        self._pix = _brand_pixmap(96)
+        self.clicked.connect(self._open_repo)
+
+    def _open_repo(self):
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(REPO_URL))
+
+    def paintEvent(self, ev):
+        # Don't call the default QPushButton paint — we render our own.
+        from PyQt6.QtGui import QPainter, QFontMetrics, QFont
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # subtle hover background
+        if self.underMouse():
+            p.fillRect(self.rect(), QColor("#11151c"))
+        w = self.width()
+        # logo (centred)
+        px = self._pix
+        x = (w - px.width()) // 2
+        y = 16
+        p.drawPixmap(x, y, px)
+        # wordmark
+        p.setPen(QColor("#f4f6fa"))
+        f = QFont(); f.setBold(True); f.setPointSize(15)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        text = "Distilmark"
+        tw = fm.horizontalAdvance(text)
+        p.drawText((w - tw) // 2, y + px.height() + 22, text)
+        # subtitle
+        p.setPen(QColor("#6b7280"))
+        f2 = QFont(); f2.setPointSize(8)
+        p.setFont(f2)
+        sub = "PDF → Markdown converter"
+        fm2 = QFontMetrics(f2)
+        sw = fm2.horizontalAdvance(sub)
+        p.drawText((w - sw) // 2, y + px.height() + 40, sub)
+        p.end()
+
+
 def _brand_mark(size: int = 26) -> QPixmap:
-    """Distilmark logo mark: a blue rounded tile with an orange distillation droplet."""
+    """Procedural fallback when icon.png isn't available — blue tile + orange droplet."""
     import math
     ss = 4  # supersample for crisp edges
     s = size * ss
@@ -2523,23 +2600,11 @@ class MainWindow(QMainWindow):
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(0)
 
-        logo_row = QHBoxLayout()
-        logo_row.setContentsMargins(18, 18, 18, 0)
-        logo_row.setSpacing(10)
-        logo_mark = QLabel()
-        logo_mark.setPixmap(_brand_mark(26))
-        logo_mark.setFixedSize(26, 26)
-        logo_text = QLabel("Distilmark")
-        logo_text.setStyleSheet("font-size: 19px; font-weight: 800;")
-        logo_row.addWidget(logo_mark)
-        logo_row.addWidget(logo_text)
-        logo_row.addStretch()
-        logo_wrap = QWidget()
-        logo_wrap.setLayout(logo_row)
-        sb.addWidget(logo_wrap)
-        sub = QLabel("PDF → Markdown converter")
-        sub.setObjectName("Subtitle")
-        sb.addWidget(sub)
+        # Big clickable brand block (logo + wordmark + tagline) — opens the repo.
+        self.brand_btn = _BrandButton()
+        sb.addWidget(self.brand_btn)
+        # Spacer pushes the NAVIGATION section down to breathe under the logo.
+        sb.addSpacing(14)
 
         section = QLabel("NAVIGATION")
         section.setObjectName("SectionLabel")
@@ -2706,8 +2771,9 @@ def main() -> None:
     cfg = config.load()
     app = QApplication(sys.argv)
     app.setApplicationName("Distilmark")
-    app.setWindowIcon(QIcon(_brand_mark(64)))
+    icon = QIcon(_brand_pixmap(256))
+    app.setWindowIcon(icon)
     w = MainWindow(cfg)
-    w.setWindowIcon(QIcon(_brand_mark(64)))
+    w.setWindowIcon(icon)
     w.show()
     sys.exit(app.exec())
