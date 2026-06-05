@@ -7,6 +7,9 @@ import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QUrl
+from PyQt6.QtCore import (
+    QPropertyAnimation, QEasingCurve, QTimer, pyqtProperty, QPointF,
+)
 from PyQt6.QtGui import QIcon, QFont, QAction, QPixmap, QPainter, QColor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -313,6 +316,138 @@ def _brand_pixmap(size: int) -> QPixmap:
                              Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
     return _brand_mark(size)
+
+
+class _SplashScreen(QWidget):
+    """Frameless, borderless launch splash with three beats:
+    fade-in → gentle "breathing" of the brand mark → fade-out.
+
+    Pure-Qt, so it behaves identically from source and inside the PyInstaller
+    .exe. There is no window frame and no coloured border — just the logo
+    breathing on a dark PyDracula card while the main window builds.
+    """
+
+    _W, _H = 440, 300
+
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.SplashScreen
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._logo = _brand_pixmap(132)
+        self._pulse = 0.0  # 0..1, drives the breathing scale + glow
+        self.resize(self._W, self._H)
+        scr = QApplication.primaryScreen()
+        if scr:
+            self.move(scr.geometry().center() - self.rect().center())
+        self.setWindowOpacity(0.0)
+
+        # Breathing: 0 → 1 → 0, looped forever, smoothly (sine in/out).
+        self._breath = QPropertyAnimation(self, b"pulse", self)
+        self._breath.setDuration(2200)
+        self._breath.setStartValue(0.0)
+        self._breath.setKeyValueAt(0.5, 1.0)
+        self._breath.setEndValue(0.0)
+        self._breath.setEasingCurve(QEasingCurve.Type.InOutSine)
+        self._breath.setLoopCount(-1)
+        self._fade = None  # keep a ref so the active fade isn't garbage-collected
+
+    # ---- "pulse" animatable property ----
+    def _get_pulse(self) -> float:
+        return self._pulse
+
+    def _set_pulse(self, v: float) -> None:
+        self._pulse = v
+        self.update()
+
+    pulse = pyqtProperty(float, fget=_get_pulse, fset=_set_pulse)
+
+    # ---- lifecycle ----
+    def fade_in(self, ms: int = 480) -> None:
+        a = QPropertyAnimation(self, b"windowOpacity", self)
+        a.setDuration(ms)
+        a.setStartValue(0.0)
+        a.setEndValue(1.0)
+        a.setEasingCurve(QEasingCurve.Type.OutCubic)
+        a.finished.connect(self._breath.start)  # breathe once fully visible
+        a.start()
+        self._fade = a
+
+    def fade_out(self, on_done) -> None:
+        self._breath.stop()
+        a = QPropertyAnimation(self, b"windowOpacity", self)
+        a.setDuration(420)
+        a.setStartValue(self.windowOpacity())
+        a.setEndValue(0.0)
+        a.setEasingCurve(QEasingCurve.Type.InCubic)
+
+        def _finish():
+            self.close()
+            on_done()
+
+        a.finished.connect(_finish)
+        a.start()
+        self._fade = a
+
+    # ---- paint ----
+    def paintEvent(self, _evt) -> None:
+        from PyQt6.QtGui import QLinearGradient
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        rect = QRectF(0, 0, self._W, self._H)
+
+        # Dark rounded card (PyDracula), no border.
+        grad = QLinearGradient(0, 0, 0, self._H)
+        grad.setColorAt(0.0, QColor("#282C34"))
+        grad.setColorAt(1.0, QColor("#21252B"))
+        p.setBrush(grad)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(rect, 22, 22)
+
+        e = self._pulse
+        cx = self._W / 2
+        logo_cy = self._H * 0.40
+
+        # Soft accent glow that swells with the breath.
+        glow = QColor("#BD93F9")  # PyDracula purple
+        glow.setAlphaF(0.08 + 0.18 * e)
+        p.setBrush(glow)
+        radius = max(self._logo.width(), self._logo.height()) * (0.62 + 0.06 * e)
+        p.drawEllipse(QPointF(cx, logo_cy), radius, radius)
+
+        # Logo, gently scaling 0.93 → 1.0 with the breath.
+        scale = 0.93 + 0.07 * e
+        lw = self._logo.width() * scale
+        lh = self._logo.height() * scale
+        p.drawPixmap(
+            QRectF(cx - lw / 2, logo_cy - lh / 2, lw, lh),
+            self._logo,
+            QRectF(self._logo.rect()),
+        )
+
+        # Wordmark + subtitle.
+        p.setPen(QColor("#F8F8F2"))
+        wf = QFont()
+        wf.setPointSize(24)
+        wf.setBold(True)
+        p.setFont(wf)
+        p.drawText(
+            QRectF(0, self._H * 0.63, self._W, 40),
+            Qt.AlignmentFlag.AlignHCenter, "Distilmark",
+        )
+        p.setPen(QColor("#6272A4"))
+        sf = QFont()
+        sf.setPointSize(10)
+        p.setFont(sf)
+        p.drawText(
+            QRectF(0, self._H * 0.63 + 42, self._W, 24),
+            Qt.AlignmentFlag.AlignHCenter, "PDF → Markdown",
+        )
+        p.end()
 
 
 class _BrandButton(QPushButton):
@@ -3378,7 +3513,26 @@ def main() -> None:
     app.setApplicationName("Distilmark")
     icon = QIcon(_brand_pixmap(256))
     app.setWindowIcon(icon)
-    w = MainWindow(cfg)
-    w.setWindowIcon(icon)
-    w.show()
+
+    # Animated launch splash: fade-in → breathing → fade-out. The main window
+    # is built after the fade-in plays, then revealed once it's ready (with a
+    # minimum on-screen time so the breathing is actually seen).
+    splash = _SplashScreen()
+    splash.show()
+    splash.fade_in()
+
+    holder: dict = {}
+
+    def _reveal():
+        w = holder["w"]
+        splash.fade_out(w.show)
+
+    def _build():
+        w = MainWindow(cfg)
+        w.setWindowIcon(icon)
+        holder["w"] = w
+        QTimer.singleShot(1100, _reveal)  # let it breathe before revealing
+
+    QTimer.singleShot(520, _build)  # build after the fade-in has played
+
     sys.exit(app.exec())

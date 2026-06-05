@@ -46,9 +46,9 @@ jobs:
           echo "Distilmark version: $v"
 
       - name: Build Distilmark Windows executable
-        # --splash shows the icon while PyInstaller's --onefile bootstrap
-        # unpacks the bundle (otherwise the user clicks the .exe and waits
-        # several seconds with nothing happening).
+        # Note: no PyInstaller --splash here. The app shows its own animated
+        # Qt splash (fade-in → breathing → fade-out, no border) from main(),
+        # which the static Tk --splash image could not do.
         run: |
           pyinstaller --noconfirm --onefile --windowed --name Distilmark `
             --collect-all pymupdf `
@@ -56,7 +56,6 @@ jobs:
             --collect-all pdfplumber `
             --add-data "icon.png;." `
             --icon icon.ico `
-            --splash icon.png `
             distilmark_launcher.py
 
       - name: Upload artifact
