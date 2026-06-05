@@ -256,7 +256,7 @@ from PyQt6.QtCore import QRectF  # noqa: E402
 from PyQt6.QtGui import QPen, QPainterPath  # noqa: E402
 
 
-def _icon_add(color: str = "#2563eb") -> QIcon:
+def _icon_add(color: str = "#BD93F9") -> QIcon:
     """A document with a plus badge — 'add PDFs'."""
     pm = QPixmap(28, 28)
     pm.fill(Qt.GlobalColor.transparent)
@@ -327,9 +327,11 @@ class _BrandButton(QPushButton):
         # so trying to read it here gave wrong colors in light mode.
         from PyQt6.QtGui import QPainter, QFontMetrics, QFont
         is_dark = (self.cfg.get("theme", "dark") or "dark") != "light"
-        text_color = QColor("#f4f6fa") if is_dark else QColor("#161a26")
-        sub_color = QColor("#6b7280") if is_dark else QColor("#8a90a0")
-        hover_bg = QColor("#11151c") if is_dark else QColor("#eef0f6")
+        # Colours mirror the PyDracula palette in styles.py so the brand block
+        # blends into the sidebar surface instead of fighting it.
+        text_color = QColor("#F8F8F2") if is_dark else QColor("#282A36")
+        sub_color  = QColor("#717E95") if is_dark else QColor("#6272A4")
+        hover_bg   = QColor("#1B1D23") if is_dark else QColor("#C3CCDF")
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -370,7 +372,7 @@ def _brand_mark(size: int = 26) -> QPixmap:
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#2563eb"))
+    p.setBrush(QColor("#BD93F9"))   # Dracula purple tile
     p.drawRoundedRect(QRectF(0, 0, s, s), s * 0.24, s * 0.24)
     # parametric teardrop, point up (matches icon.png)
     cx, cy, sx, sy, m = s * 0.5, s * 0.52, s * 0.30, s * 0.30, 3.0
@@ -382,14 +384,14 @@ def _brand_mark(size: int = 26) -> QPixmap:
         px, py = cx + sx * v, cy - sy * u
         drop.moveTo(px, py) if i == 0 else drop.lineTo(px, py)
     drop.closeSubpath()
-    p.setBrush(QColor("#f97316"))
+    p.setBrush(QColor("#FF79C6"))   # Dracula pink droplet
     p.drawPath(drop)
     p.end()
     return pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
                      Qt.TransformationMode.SmoothTransformation)
 
 
-def _icon_folder(color: str = "#f97316") -> QIcon:
+def _icon_folder(color: str = "#FF79C6") -> QIcon:
     """A folder outline — 'add folder'."""
     pm = QPixmap(28, 28)
     pm.fill(Qt.GlobalColor.transparent)
@@ -562,12 +564,12 @@ class ConvertPage(QWidget):
         # File / folder picker row
         file_row = QHBoxLayout()
         self.pick_btn = QPushButton(" Add PDFs")
-        self.pick_btn.setIcon(_icon_add("#2563eb"))
+        self.pick_btn.setIcon(_icon_add("#BD93F9"))
         self.pick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.pick_btn.clicked.connect(self.pick_files)
 
         self.folder_btn = QPushButton(" Add Folder")
-        self.folder_btn.setIcon(_icon_folder("#f97316"))
+        self.folder_btn.setIcon(_icon_folder("#FF79C6"))
         self.folder_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.folder_btn.clicked.connect(self.pick_folder)
 
@@ -1060,7 +1062,7 @@ class ConvertPage(QWidget):
         item.setData(_ROLE_ENGINE, "")  # "" = use default engine
         item.setData(_ROLE_SCANNED, scanned)
         if scanned:
-            item.setForeground(QColor("#fbbf24"))
+            item.setForeground(QColor("#F1FA8C"))
             item.setToolTip(
                 "This PDF appears to contain little or no extractable text "
                 "— it's likely a scan. Enable OCR in Advanced options to "
@@ -1530,7 +1532,7 @@ class SettingsPage(QWidget):
 
         self.pull_status = QLabel("")
         self.pull_status.setWordWrap(True)
-        self.pull_status.setStyleSheet("color: #8a909c; font-size: 11px;")
+        self.pull_status.setStyleSheet("color: #717E95; font-size: 11px;")
         f.addRow("", self.pull_status)
 
         layout.addWidget(olm)
@@ -1667,17 +1669,17 @@ class SettingsPage(QWidget):
         url = self.ollama_url.text().strip()
         running = ollama_manager.is_running(url)
         if running:
-            self.service_label.setStyleSheet("color: #9ece6a;")
+            self.service_label.setStyleSheet("color: #50FA7B;")
             self.service_label.setText("● Running")
             self.start_service_btn.setVisible(False)
         else:
             binary = ollama_manager.has_ollama_binary()
             if binary:
-                self.service_label.setStyleSheet("color: #e0af68;")
+                self.service_label.setStyleSheet("color: #F1FA8C;")
                 self.service_label.setText("○ Not running")
                 self.start_service_btn.setVisible(True)
             else:
-                self.service_label.setStyleSheet("color: #f7768e;")
+                self.service_label.setStyleSheet("color: #FF5555;")
                 self.service_label.setText(
                     "✗ Ollama not installed — get it at ollama.com/download"
                 )
@@ -1786,7 +1788,7 @@ class SettingsPage(QWidget):
         dest = dirs[0] if dirs else ollama_manager.default_models_dir()
         self.pull_progress.setVisible(True)
         self.pull_progress.setValue(0)
-        self.pull_status.setStyleSheet("color: #8a909c;")
+        self.pull_status.setStyleSheet("color: #717E95;")
         self.pull_status.setText(f"Starting direct download of {model} → {dest}")
         self.pull_btn.setEnabled(False)
         self.cancel_btn.setVisible(True)
@@ -1799,7 +1801,7 @@ class SettingsPage(QWidget):
     def _cancel_pull(self):
         if self._pull_worker and self._pull_worker.isRunning():
             self._pull_worker.terminate()
-            self.pull_status.setStyleSheet("color: #e0af68;")
+            self.pull_status.setStyleSheet("color: #F1FA8C;")
             self.pull_status.setText("Download cancelled.")
             self.pull_btn.setEnabled(True)
             self.cancel_btn.setVisible(False)
@@ -1812,7 +1814,7 @@ class SettingsPage(QWidget):
         self.pull_btn.setEnabled(True)
         self.cancel_btn.setVisible(False)
         self.pull_progress.setValue(100)
-        self.pull_status.setStyleSheet("color: #9ece6a;")
+        self.pull_status.setStyleSheet("color: #50FA7B;")
         self.pull_status.setText("✓ Download complete — model is ready to use.")
         self._scan_filesystem()
         self._refresh_service_status()
@@ -1827,7 +1829,7 @@ class SettingsPage(QWidget):
         self.pull_btn.setEnabled(True)
         self.cancel_btn.setVisible(False)
         self.pull_progress.setVisible(False)
-        self.pull_status.setStyleSheet("color: #f7768e;")
+        self.pull_status.setStyleSheet("color: #FF5555;")
         # First line of traceback as friendly summary
         last = err.strip().splitlines()[-1] if err.strip() else "Unknown error"
         self.pull_status.setText(f"✗ {last}")
@@ -1924,9 +1926,9 @@ class HistoryPage(QWidget):
             )
             item = QListWidgetItem(text)
             if status == "error":
-                item.setForeground(QColor("#f7768e"))
+                item.setForeground(QColor("#FF5555"))
             else:
-                item.setForeground(QColor("#9ece6a"))
+                item.setForeground(QColor("#50FA7B"))
             self.list.addItem(item)
 
     def _clear(self):
@@ -1960,7 +1962,8 @@ class PreviewPage(QWidget):
         self.refresh_theme()
 
     def _icon_color(self) -> str:
-        return "#cfd3dc" if self.cfg.get("theme", "dark") != "light" else "#3a3f4b"
+        # PyDracula icon tone (light grey on dark surface, slate on paper).
+        return "#ABB2BF" if self.cfg.get("theme", "dark") != "light" else "#4B5263"
 
     def _build(self):
         layout = QVBoxLayout(self)
@@ -2623,9 +2626,9 @@ class CoursesPage(QWidget):
                 ditem.setData(0, _ROLE_SOURCE, d["source"])
                 ditem.setToolTip(0, d["source"])
                 color = {
-                    projects.CONVERTED: "#22c55e",
-                    projects.FAILED: "#f87171",
-                    projects.ADDED: "#fbbf24",
+                    projects.CONVERTED: "#50FA7B",
+                    projects.FAILED: "#FF5555",
+                    projects.ADDED: "#F1FA8C",
                 }.get(status)
                 if color:
                     ditem.setForeground(1, QColor(color))
@@ -3022,7 +3025,8 @@ class MainWindow(QMainWindow):
 
     # ---- collapsible sidebar ----
     def _sidebar_icon_color(self) -> str:
-        return "#cfd3dc" if self.cfg.get("theme", "dark") != "light" else "#3a3f4b"
+        # PyDracula icon tone (light grey on dark surface, slate on paper).
+        return "#ABB2BF" if self.cfg.get("theme", "dark") != "light" else "#4B5263"
 
     def _refresh_sidebar_icons(self):
         """(Re)paint the chevron + per-item nav icons in the current theme."""
