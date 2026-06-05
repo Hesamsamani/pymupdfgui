@@ -146,6 +146,77 @@ def _assemble(pages: list[str], opts: ConvertOptions) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Strikethrough detection
+# ---------------------------------------------------------------------------
+
+def _detect_strikethrough_spans(page: pymupdf.Page) -> list[str]:
+    """Find substrings on this page that are visually crossed by a horizontal
+    line — i.e. struck through.
+
+    PDFs don't carry a "strikethrough" character attribute the way HTML does;
+    publishers draw a thin horizontal line on top of the glyphs. We pick up
+    those lines from ``page.get_drawings()`` and check whether each one passes
+    through a text span's vertical middle.
+
+    Returns the raw text of each struck span (deduplicated, longest first so
+    the caller's string-replace pass can wrap the longest match before any
+    contained substring)."""
+    hlines: list[tuple[float, float, float]] = []   # (x0, x1, y)
+    for d in page.get_drawings():
+        for item in d.get("items", ()):
+            kind = item[0]
+            if kind == "l":                          # straight line
+                p1, p2 = item[1], item[2]
+                if abs(p1.y - p2.y) < 1.0 and abs(p1.x - p2.x) >= 8.0:
+                    x0, x1 = sorted((p1.x, p2.x))
+                    hlines.append((x0, x1, (p1.y + p2.y) / 2))
+            elif kind == "re":                       # rectangle drawn as a thin bar
+                r = item[1]
+                if r.height < 2.0 and r.width >= 8.0:
+                    hlines.append((r.x0, r.x1, (r.y0 + r.y1) / 2))
+    if not hlines:
+        return []
+
+    struck: list[str] = []
+    seen: set[str] = set()
+    for block in page.get_text("dict").get("blocks", ()):
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines", ()):
+            for span in line.get("spans", ()):
+                sx0, sy0, sx1, sy1 = span["bbox"]
+                height = sy1 - sy0
+                ymid = (sy0 + sy1) / 2
+                tol = max(2.0, height * 0.45)
+                for lx0, lx1, ly in hlines:
+                    if abs(ly - ymid) <= tol and lx0 < sx1 - 2 and lx1 > sx0 + 2:
+                        t = span["text"].strip()
+                        if t and t not in seen:
+                            struck.append(t)
+                            seen.add(t)
+                        break
+    struck.sort(key=len, reverse=True)
+    return struck
+
+
+def _apply_strikethrough(md: str, struck: list[str]) -> str:
+    """Wrap each detected struck string in GitHub-flavoured ``~~strike~~``.
+
+    The replacement is per-occurrence and skips strings that are already inside
+    a ``~~ … ~~`` pair (idempotent on re-runs and on text that was already
+    matched as a longer parent string)."""
+    if not struck:
+        return md
+    for s in struck:
+        if not s or s in ("~", "~~"):
+            continue
+        # ``re.escape`` is the safe way to put arbitrary text into a regex.
+        pat = re.compile(rf"(?<!~){re.escape(s)}(?!~)")
+        md = pat.sub(lambda m: f"~~{m.group(0)}~~", md, count=1)
+    return md
+
+
+# ---------------------------------------------------------------------------
 # Native PyMuPDF
 # ---------------------------------------------------------------------------
 
@@ -282,6 +353,9 @@ def convert_native(
                 chunk = [md]
                 if img_dir is not None:
                     _extract_images(doc, page, img_dir, opts.image_dir_name, chunk)
+        struck = _detect_strikethrough_spans(page)
+        if struck:
+            chunk = [_apply_strikethrough(c, struck) for c in chunk]
         pages.append("\n".join(chunk))
     doc.close()
     pages = postprocess(pages, opts)
@@ -340,6 +414,57 @@ def _table_to_md(table: list[list[str | None]]) -> str:
     return "\n".join(lines)
 
 
+# Larger word-bounding tolerances than pdfplumber's defaults (3 / 3). Tight
+# defaults cause cells whose visual text extends slightly past the detected
+# bbox to truncate (e.g. "study from o" instead of "study from on..."). The
+# user can still override these via opts.plumber_table_settings.
+_DEFAULT_PDFPLUMBER_TABLE_SETTINGS = {
+    "text_x_tolerance": 6,
+    "text_y_tolerance": 6,
+}
+
+
+def _pdfplumber_extract_images_with_y(
+    pdf_path: Path,
+    page_index: int,
+    image_dir: Path,
+    image_dir_name: str | None,
+) -> list[tuple[float, str]]:
+    """Use PyMuPDF to write each embedded image on the page and return a list
+    of ``(top_y, markdown_ref)`` so the caller can interleave images with text
+    in reading order. pdfplumber doesn't extract raster images itself."""
+    out: list[tuple[float, str]] = []
+    try:
+        d = pymupdf.open(str(pdf_path))
+        page = d[page_index]
+        image_dir.mkdir(parents=True, exist_ok=True)
+        from urllib.parse import quote
+        for img_index, info in enumerate(page.get_images(full=True)):
+            xref = info[0]
+            try:
+                pix = pymupdf.Pixmap(d, xref)
+                if pix.n - pix.alpha >= 4:
+                    pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                name = f"page{page.number+1}_img{img_index+1}.png"
+                path = image_dir / name
+                pix.save(str(path))
+                if image_dir_name:
+                    ref = f"./{quote(image_dir_name)}/{quote(name)}"
+                else:
+                    ref = quote(path.as_posix(), safe="/:")
+                # Find this image's position on the page (top y); fall back to
+                # bottom of page so unplaceable images still land at the end.
+                rects = page.get_image_rects(xref) or [pymupdf.Rect(0, page.rect.height, 0, page.rect.height)]
+                top_y = float(rects[0].y0)
+                out.append((top_y, f"\n![image]({ref})\n"))
+            except Exception:
+                continue
+        d.close()
+    except Exception:
+        return out
+    return out
+
+
 def convert_pdfplumber(
     pdf_path: Path,
     opts: ConvertOptions,
@@ -352,7 +477,9 @@ def convert_pdfplumber(
             "pdfplumber is not installed. Run: pip install pdfplumber"
         ) from e
 
-    table_settings = opts.plumber_table_settings or None
+    # Merge user table settings on top of our higher-tolerance defaults so the
+    # user can still override anything they want.
+    table_settings = {**_DEFAULT_PDFPLUMBER_TABLE_SETTINGS, **(opts.plumber_table_settings or {})}
     pages_md: list[str] = []
     with pdfplumber.open(str(pdf_path)) as doc:
         total = len(doc.pages)
@@ -362,42 +489,99 @@ def convert_pdfplumber(
             page = doc.pages[i]
             if progress:
                 progress(n + 1, len(indices), f"Page {i+1}/{total} (pdfplumber)")
-            text = page.extract_text() or ""
-            tables = []
+            # ---- Collect (top, kind, payload) blocks to interleave by Y ----
+            # Each block knows its vertical position, so text, images, and
+            # tables come out in actual reading order — not all-text-then-
+            # all-images-then-all-tables.
+            blocks: list[tuple[float, int, str]] = []   # (top, kind_order, md)
+            #  kind_order: 0 = text, 1 = table, 2 = image — used as a stable
+            #  secondary sort key when two blocks share the same y.
+
+            # 1) per-line text via extract_text_lines (each line has 'top')
+            #    Fall back to one big extract_text block at y=0 if unavailable.
+            text_lines: list[dict] = []
+            try:
+                text_lines = page.extract_text_lines() or []
+            except Exception:
+                text_lines = []
+            if text_lines:
+                for ln in text_lines:
+                    t = (ln.get("text") or "").strip()
+                    if t:
+                        blocks.append((float(ln.get("top", 0.0)), 0, t))
+            else:
+                whole = (page.extract_text() or "").strip()
+                if whole:
+                    blocks.append((0.0, 0, whole))
+                elif opts.ocr_enabled:
+                    try:
+                        _d = pymupdf.open(str(pdf_path))
+                        ocr_text = _ocr_page(_d[i], opts.ocr_language)
+                        _d.close()
+                        if ocr_text:
+                            blocks.append((0.0, 0, ocr_text))
+                    except Exception as e:
+                        blocks.append((0.0, 0, f"<!-- OCR unavailable for page {i+1}: {e} -->"))
+
+            # 2) tables (each table object knows its bbox → top y). When a
+            #    table is detected, drop any plain-text lines that fall inside
+            #    its bbox so the same cells don't appear twice.
             if opts.plumber_tables_enabled:
                 try:
-                    tables = page.extract_tables(table_settings) if table_settings else page.extract_tables()
+                    found = page.find_tables(table_settings=table_settings) or []
                 except Exception:
-                    tables = []
-            page_chunks: list[str] = []
-            if text.strip():
-                page_chunks.append(text.strip())
-            elif opts.ocr_enabled:
-                # pdfplumber can't OCR — fall back to PyMuPDF Tesseract
-                try:
-                    import pymupdf as _mu
-                    _d = _mu.open(str(pdf_path))
-                    ocr_text = _ocr_page(_d[i], opts.ocr_language)
-                    _d.close()
-                    if ocr_text:
-                        page_chunks.append(ocr_text)
-                except Exception as e:
-                    page_chunks.append(f"<!-- OCR unavailable for page {i+1}: {e} -->")
-            for t in tables or []:
-                md_table = _table_to_md(t)
-                if md_table:
-                    page_chunks.append("\n" + md_table + "\n")
+                    found = []
+                for tbl in found:
+                    try:
+                        rows = tbl.extract()
+                    except Exception:
+                        rows = []
+                    md_table = _table_to_md(rows)
+                    if not md_table:
+                        continue
+                    bbox = getattr(tbl, "bbox", None)  # (x0, top, x1, bottom)
+                    top = float(bbox[1]) if bbox else 0.0
+                    bottom = float(bbox[3]) if bbox else top + 1.0
+                    blocks.append((top, 1, "\n" + md_table + "\n"))
+                    # Drop any text-line blocks that sit inside this table.
+                    blocks = [
+                        b for b in blocks
+                        if not (b[1] == 0 and top <= b[0] <= bottom)
+                    ] + [(top, 1, "\n" + md_table + "\n")]  # re-add table once
+                    # de-dupe the re-add above (the list-comp re-adds nothing
+                    # because the table block was already excluded — keep one):
+                    seen = set()
+                    deduped: list[tuple[float, int, str]] = []
+                    for b in blocks:
+                        key = (b[0], b[1], b[2])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        deduped.append(b)
+                    blocks = deduped
+
+            # 3) images, placed at their actual top-y position on the page
             if opts.include_images and opts.image_dir is not None:
-                # pdfplumber doesn't extract embedded images directly; fall back
-                # to PyMuPDF for the image side-pull so users still get them.
-                try:
-                    import pymupdf as _mu
-                    _d = _mu.open(str(pdf_path))
-                    _extract_images(_d, _d[i], opts.image_dir, opts.image_dir_name, page_chunks)
-                    _d.close()
-                except Exception:
-                    pass
-            pages_md.append("\n\n".join(page_chunks))
+                for top_y, ref in _pdfplumber_extract_images_with_y(
+                    pdf_path, i, opts.image_dir, opts.image_dir_name
+                ):
+                    blocks.append((top_y, 2, ref))
+
+            # Sort and emit
+            blocks.sort(key=lambda b: (b[0], b[1]))
+            page_md = "\n\n".join(b[2] for b in blocks)
+
+            # 4) strikethrough detection (uses PyMuPDF for the drawings layer)
+            try:
+                _d = pymupdf.open(str(pdf_path))
+                struck = _detect_strikethrough_spans(_d[i])
+                _d.close()
+            except Exception:
+                struck = []
+            if struck:
+                page_md = _apply_strikethrough(page_md, struck)
+
+            pages_md.append(page_md)
     pages_md = postprocess(pages_md, opts)
     return _assemble(pages_md, opts)
 
