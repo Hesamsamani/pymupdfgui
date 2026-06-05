@@ -2136,6 +2136,8 @@ class CoursesPage(QWidget):
         self.convert_btn.setObjectName("Primary")
         self.open_btn = QPushButton("Open output")
         self.open_btn.setObjectName("Ghost")
+        self.rename_btn = QPushButton("Rename")
+        self.rename_btn.setObjectName("Ghost")
         self.remove_btn = QPushButton("Remove")
         self.remove_btn.setObjectName("Danger")
         for b, fn, tip in [
@@ -2143,6 +2145,7 @@ class CoursesPage(QWidget):
             (self.add_pdfs_btn, self._add_pdfs, "Add PDF files to the selected chapter."),
             (self.convert_btn, self._convert_pending, "Convert every not-yet-converted document in this course."),
             (self.open_btn, self._open_selected_output, "Open the converted Markdown / its folder."),
+            (self.rename_btn, self._rename_chapter, "Rename the selected chapter."),
             (self.remove_btn, self._remove_selected, "Remove the selected chapter or document."),
         ]:
             b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2152,6 +2155,7 @@ class CoursesPage(QWidget):
         trow.addWidget(self.add_pdfs_btn)
         trow.addStretch()
         trow.addWidget(self.open_btn)
+        trow.addWidget(self.rename_btn)
         trow.addWidget(self.remove_btn)
         trow.addWidget(self.convert_btn)
         layout.addLayout(trow)
@@ -2164,6 +2168,8 @@ class CoursesPage(QWidget):
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(True)
         self.tree.itemDoubleClicked.connect(self._on_double_click)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_tree_menu)
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for i in (1, 2, 3):
@@ -2249,6 +2255,64 @@ class CoursesPage(QWidget):
         if ok and name.strip():
             projects.add_chapter(self._pid, name)
             self._refresh_tree()
+
+    def _chapter_item(self):
+        """Return the selected chapter's tree item (climbing up from a document),
+        or None if nothing chapter-related is selected."""
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        if item.data(0, _ROLE_KIND) == "document":
+            item = item.parent()
+        if item is not None and item.data(0, _ROLE_KIND) == "chapter":
+            return item
+        return None
+
+    def _rename_chapter(self):
+        if not self._pid:
+            return
+        item = self._chapter_item()
+        if item is None:
+            QMessageBox.information(self, "Courses", "Select a chapter to rename."); return
+        cid = item.data(0, _ROLE_CID)
+        name, ok = QInputDialog.getText(
+            self, "Rename chapter", "New chapter name:", text=item.text(0)
+        )
+        if ok and name.strip():
+            projects.rename_chapter(self._pid, cid, name)
+            self._refresh_tree()
+
+    def _move_chapter(self, delta: int):
+        if not self._pid:
+            return
+        item = self._chapter_item()
+        if item is None:
+            return
+        projects.move_chapter(self._pid, item.data(0, _ROLE_CID), delta)
+        self._refresh_tree()
+
+    def _show_tree_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        item = self.tree.itemAt(pos)
+        if item is not None:
+            self.tree.setCurrentItem(item)
+        menu = QMenu(self)
+        kind = item.data(0, _ROLE_KIND) if item is not None else None
+        if kind == "chapter":
+            menu.addAction("Rename chapter", self._rename_chapter)
+            menu.addAction("Move up", lambda: self._move_chapter(-1))
+            menu.addAction("Move down", lambda: self._move_chapter(1))
+            menu.addSeparator()
+            menu.addAction("Add PDFs to chapter", self._add_pdfs)
+            menu.addSeparator()
+            menu.addAction("Remove chapter", self._remove_selected)
+        elif kind == "document":
+            menu.addAction("Open output", self._open_selected_output)
+            menu.addSeparator()
+            menu.addAction("Remove document", self._remove_selected)
+        else:
+            menu.addAction("New chapter", self._add_chapter)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _selected_chapter_id(self) -> str | None:
         item = self.tree.currentItem()
