@@ -149,12 +149,75 @@ def _assemble(pages: list[str], opts: ConvertOptions) -> str:
 # Native PyMuPDF
 # ---------------------------------------------------------------------------
 
-def _native_page_markdown(page: pymupdf.Page) -> str:
+def _native_page_markdown(
+    page: pymupdf.Page,
+    image_dir: Path | None = None,
+    image_dir_name: str | None = None,
+) -> str | None:
+    """Convert one page to Markdown via pymupdf4llm.
+
+    When ``image_dir`` is given we let pymupdf4llm *write the page's pictures
+    and vector graphics itself* (``write_images=True``). That matters for two
+    reasons:
+
+      • the image links are inserted **inline at the correct reading position**,
+        so text that sits below a figure stays below it (previously every image
+        was appended at the end of the page, which pushed any later text above
+        the figure);
+      • pymupdf4llm no longer emits its ``==> picture … intentionally omitted``
+        placeholder — it only does that when images are neither written nor
+        embedded.
+
+    pymupdf4llm embeds the (absolute) path it wrote to, so we rewrite those to
+    portable, URL-encoded relative refs (``./<folder>/<file>``).
+
+    Returns ``None`` when pymupdf4llm is unavailable so the caller can fall back
+    to the manual block extractor.
+    """
     try:
         import pymupdf4llm  # type: ignore
-        return pymupdf4llm.to_markdown(page.parent, pages=[page.number])
     except Exception:
-        pass
+        return None
+    kwargs: dict = {"pages": [page.number]}
+    if image_dir is not None:
+        image_dir.mkdir(parents=True, exist_ok=True)
+        kwargs.update(
+            write_images=True,
+            image_path=str(image_dir),
+            image_format="png",
+            dpi=150,
+        )
+    try:
+        md = pymupdf4llm.to_markdown(page.parent, **kwargs)
+    except Exception:
+        return None
+    if image_dir is not None:
+        md = _relativise_image_refs(md, image_dir, image_dir_name)
+    return md
+
+
+def _relativise_image_refs(
+    md: str, image_dir: Path, image_dir_name: str | None
+) -> str:
+    """Rewrite the absolute image paths pymupdf4llm embeds into portable,
+    URL-encoded relative refs so the exported .md previews everywhere
+    (browsers, GitHub, Obsidian, the in-app Preview)."""
+    from urllib.parse import quote
+    from posixpath import basename
+
+    def repl(m: "re.Match[str]") -> str:
+        name = basename(m.group(1).replace("\\", "/"))
+        if image_dir_name:
+            return f"![](./{quote(image_dir_name)}/{quote(name)})"
+        return f"![]({quote((image_dir / name).as_posix(), safe='/:')})"
+
+    return re.sub(r"!\[\]\(([^)]+)\)", repl, md)
+
+
+def _manual_page_markdown(page: pymupdf.Page) -> str:
+    """Block-based fallback used only when pymupdf4llm is unavailable. Infers
+    headings from font size and bold flags — no image handling (the caller
+    appends images separately for this path)."""
     blocks = page.get_text("dict")["blocks"]
     parts: list[str] = []
     for b in blocks:
@@ -199,16 +262,26 @@ def convert_native(
         if progress:
             progress(n + 1, len(indices), f"Page {i+1}/{total} (native)")
         raw = page.get_text().strip()
+        img_dir = opts.image_dir if (opts.include_images and opts.image_dir is not None) else None
         if opts.ocr_enabled and len(raw) < 8:
             try:
                 md = _ocr_page(page, opts.ocr_language)
             except Exception as e:  # Tesseract missing / failed — keep going
                 md = f"<!-- OCR unavailable for page {i+1}: {e} -->"
+            chunk = [md]
+            # OCR gives no layout, so images can only be appended at the end.
+            if img_dir is not None:
+                _extract_images(doc, page, img_dir, opts.image_dir_name, chunk)
         else:
-            md = _native_page_markdown(page)
-        chunk = [md]
-        if opts.include_images and opts.image_dir is not None:
-            _extract_images(doc, page, opts.image_dir, opts.image_dir_name, chunk)
+            md = _native_page_markdown(page, img_dir, opts.image_dir_name)
+            if md is not None:
+                # pymupdf4llm already inlined the images in reading order.
+                chunk = [md]
+            else:
+                md = _manual_page_markdown(page)
+                chunk = [md]
+                if img_dir is not None:
+                    _extract_images(doc, page, img_dir, opts.image_dir_name, chunk)
         pages.append("\n".join(chunk))
     doc.close()
     pages = postprocess(pages, opts)
