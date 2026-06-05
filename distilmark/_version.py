@@ -6,4 +6,4 @@ Kept import-free so it can be imported from both ``distilmark/__init__.py`` and
 correctly inside a frozen PyInstaller bundle (no file reads or installed
 package metadata required).
 """
-__version__ = "1.2.2"
+__version__ = "1.2.3"

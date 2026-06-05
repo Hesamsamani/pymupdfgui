@@ -1839,6 +1839,8 @@ class PreviewPage(QWidget):
         self._page_index = 0
         self._page_count = 0
         self._data: dict | None = None
+        self._zoom = 1.0          # PDF render scale factor
+        self._sync = False        # PDF↔MD page sync toggle
         self._build()
 
     def _build(self):
@@ -1873,9 +1875,48 @@ class PreviewPage(QWidget):
         self.next_btn.clicked.connect(self._next_page)
         self.page_label = QLabel("—")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Zoom controls
+        self.zoom_out_btn = QPushButton("－")
+        self.zoom_out_btn.setObjectName("Ghost")
+        self.zoom_out_btn.setToolTip("Zoom out (Ctrl + −)")
+        self.zoom_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.zoom_out_btn.setFixedWidth(34)
+        self.zoom_out_btn.clicked.connect(lambda: self._set_zoom(self._zoom / 1.25))
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setFixedWidth(52)
+        self.zoom_in_btn = QPushButton("＋")
+        self.zoom_in_btn.setObjectName("Ghost")
+        self.zoom_in_btn.setToolTip("Zoom in (Ctrl + +)")
+        self.zoom_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.zoom_in_btn.setFixedWidth(34)
+        self.zoom_in_btn.clicked.connect(lambda: self._set_zoom(self._zoom * 1.25))
+        self.zoom_reset_btn = QPushButton("⤺")
+        self.zoom_reset_btn.setObjectName("Ghost")
+        self.zoom_reset_btn.setToolTip("Reset zoom (Ctrl + 0)")
+        self.zoom_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.zoom_reset_btn.setFixedWidth(34)
+        self.zoom_reset_btn.clicked.connect(lambda: self._set_zoom(1.0))
+        # Live PDF↔MD sync toggle
+        self.sync_btn = QPushButton("🔗 Sync")
+        self.sync_btn.setObjectName("Ghost")
+        self.sync_btn.setCheckable(True)
+        self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sync_btn.setToolTip(
+            "Live-sync the Markdown view to the current PDF page. "
+            "Scrolls the rendered Markdown proportionally as you flip pages."
+        )
+        self.sync_btn.toggled.connect(self._on_sync_toggled)
         nav.addWidget(self.prev_btn)
         nav.addWidget(self.page_label, 1)
         nav.addWidget(self.next_btn)
+        nav.addSpacing(8)
+        nav.addWidget(self.zoom_out_btn)
+        nav.addWidget(self.zoom_label)
+        nav.addWidget(self.zoom_in_btn)
+        nav.addWidget(self.zoom_reset_btn)
+        nav.addSpacing(8)
+        nav.addWidget(self.sync_btn)
         lv.addLayout(nav)
         self.pdf_scroll = QScrollArea()
         self.pdf_scroll.setWidgetResizable(False)
@@ -1888,6 +1929,9 @@ class PreviewPage(QWidget):
 
         # Right — markdown output tabs
         self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(
+            lambda _i: self._sync and self._sync_md_to_page()
+        )
         splitter.addWidget(self.tabs)
         splitter.setSizes([460, 660])
         layout.addWidget(splitter, 1)
@@ -2039,7 +2083,7 @@ class PreviewPage(QWidget):
             import pymupdf
             doc = pymupdf.open(self._pdf_path)
             page = doc[self._page_index]
-            pix = page.get_pixmap(dpi=110)
+            pix = page.get_pixmap(dpi=int(110 * self._zoom))
             data = pix.tobytes("png")
             doc.close()
             img = QPixmap()
@@ -2052,6 +2096,9 @@ class PreviewPage(QWidget):
         self.page_label.setText(f"Page {self._page_index + 1} / {self._page_count}")
         self.prev_btn.setEnabled(self._page_index > 0)
         self.next_btn.setEnabled(self._page_index < self._page_count - 1)
+        self.zoom_label.setText(f"{int(self._zoom * 100)}%")
+        if self._sync:
+            self._sync_md_to_page()
 
     def _prev_page(self):
         if self._page_index > 0:
@@ -2062,6 +2109,55 @@ class PreviewPage(QWidget):
         if self._page_index < self._page_count - 1:
             self._page_index += 1
             self._render_pdf_page()
+
+    # ---- zoom ----
+    def _set_zoom(self, z: float):
+        self._zoom = max(0.25, min(5.0, z))
+        self._render_pdf_page()
+
+    def wheelEvent(self, event):
+        # Ctrl + mouse wheel zooms the PDF, matching common viewer UX.
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._set_zoom(self._zoom * (1.25 if event.angleDelta().y() > 0 else 1 / 1.25))
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            key = event.key()
+            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                self._set_zoom(self._zoom * 1.25); return
+            if key == Qt.Key.Key_Minus:
+                self._set_zoom(self._zoom / 1.25); return
+            if key == Qt.Key.Key_0:
+                self._set_zoom(1.0); return
+        super().keyPressEvent(event)
+
+    # ---- sync ----
+    def _on_sync_toggled(self, checked: bool):
+        self._sync = checked
+        self.sync_btn.setText("🔗 Sync on" if checked else "🔗 Sync")
+        if checked:
+            self._sync_md_to_page()
+
+    def _sync_md_to_page(self):
+        """Scroll the currently visible Markdown browser to the position that
+        proportionally matches the current PDF page. PyMuPDF's Markdown output
+        does not carry explicit page anchors, so we approximate by mapping
+        ``page_index / page_count`` onto the rendered document's scroll range."""
+        if self._page_count <= 1:
+            return
+        idx = getattr(self, "tabs", None) and self.tabs.currentIndex()
+        if idx is None or idx < 0:
+            return
+        browser = (getattr(self, "_rendered_browsers", {}) or {}).get(idx)
+        if browser is None:
+            return
+        ratio = self._page_index / max(1, self._page_count - 1)
+        bar = browser.verticalScrollBar()
+        if bar.maximum() > 0:
+            bar.setValue(int(bar.maximum() * ratio))
 
 
 # ---------------------------------------------------------------------------
