@@ -92,6 +92,8 @@ DEFAULTS: dict[str, Any] = {
     # watch a folder for new PDFs and auto-add them
     "watch_folder": "",
     "watch_auto_convert": False,
+    # first-run setup wizard (shown once until completed/skipped)
+    "wizard_completed": False,
 }
 
 

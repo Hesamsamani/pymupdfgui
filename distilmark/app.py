@@ -44,6 +44,10 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QHeaderView,
     QDialog,
+    QWizard,
+    QWizardPage,
+    QRadioButton,
+    QButtonGroup,
 )
 
 from . import config, converters, styles, ollama_manager, exporters, projects
@@ -1362,6 +1366,29 @@ class ConvertPage(QWidget):
         self.cfg["stream_output"] = self.stream_cb_w.isChecked()
         self.cfg["auto_open_output"] = self.auto_open_cb.isChecked()
         config.save(self.cfg)
+
+    def apply_cfg(self):
+        """Push cfg values into the widgets (reverse of _sync_cfg). Called after
+        the setup wizard changes settings programmatically so the Convert page
+        reflects them immediately."""
+        eng = self.cfg.get("engine", "native")
+        for i in range(self.engine_combo.count()):
+            if self.engine_combo.itemData(i) == eng:
+                self.engine_combo.setCurrentIndex(i)
+                break
+        self.images_cb.setChecked(self.cfg.get("include_images", True))
+        self.sep_cb.setChecked(self.cfg.get("page_separator", True))
+        self.range_from.setText(str(self.cfg.get("page_range_from", "")))
+        self.range_to.setText(str(self.cfg.get("page_range_to", "")))
+        self.ocr_cb.setChecked(self.cfg.get("ocr_enabled", False))
+        self.ocr_lang.setText(self.cfg.get("ocr_language", "eng"))
+        self.pp_hyphen_cb.setChecked(self.cfg.get("pp_merge_hyphens", False))
+        self.pp_blanks_cb.setChecked(self.cfg.get("pp_collapse_blanks", False))
+        self.pp_hf_cb.setChecked(self.cfg.get("pp_strip_headers_footers", False))
+        self.tables_cb.setChecked(self.cfg.get("plumber_tables_enabled", True))
+        self.math_cb.setChecked(self.cfg.get("math_mode", False))
+        self.stream_cb_w.setChecked(self.cfg.get("stream_output", False))
+        self.auto_open_cb.setChecked(self.cfg.get("auto_open_output", False))
 
     def _estimate_cost(self):
         if not self.queue:
@@ -3247,6 +3274,245 @@ class AboutPage(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# New-project setup wizard
+# ---------------------------------------------------------------------------
+
+# (id, title, description) — the four guided goals.
+_WIZARD_USE_CASES = [
+    ("study", "🎓  Exam / study prep",
+     "Organise per-chapter PDFs into a Course and convert them all at once — "
+     "ready for summaries, flashcards and concept graphs."),
+    ("convert", "📄  Convert a document or folder",
+     "Turn a single PDF — or a whole folder — into clean Markdown."),
+    ("tables", "📐  Tables and data",
+     "Spreadsheet-like PDFs: pull tables out as GitHub-flavoured Markdown "
+     "with layout-aware parsing."),
+    ("research", "🔬  Research papers",
+     "Academic PDFs with equations: math-mode Markdown via an AI engine "
+     "for the cleanest structure."),
+]
+
+# (engine id, label) — the engines the wizard can pre-select.
+_WIZARD_ENGINES = [
+    ("native", "Native — fully offline, fast & private"),
+    ("pdfplumber", "pdfplumber — offline, best for tables"),
+    ("ollama", "Ollama — local AI model (offline)"),
+    ("openai", "OpenAI — hosted AI (needs API key)"),
+    ("anthropic", "Anthropic Claude — hosted AI (needs API key)"),
+    ("bedrock", "AWS Bedrock — Claude/Nova on your AWS account"),
+    ("openai_compatible", "OpenAI-compatible — Groq / OpenRouter / LM Studio…"),
+]
+
+# Per-engine credential fields: (label, cfg_key, is_password).
+_WIZARD_ENGINE_FIELDS = {
+    "native": [],
+    "pdfplumber": [],
+    "ollama": [("Server URL", "ollama_url", False),
+               ("Model", "ollama_model", False)],
+    "openai": [("API key", "openai_api_key", True),
+               ("Model", "openai_model", False)],
+    "anthropic": [("API key", "anthropic_api_key", True),
+                  ("Model", "anthropic_model", False)],
+    "bedrock": [("Region", "bedrock_region", False),
+                ("Access key ID", "bedrock_access_key", False),
+                ("Secret access key", "bedrock_secret_key", True),
+                ("Model id", "bedrock_model", False)],
+    "openai_compatible": [("Base URL", "compat_base_url", False),
+                          ("API key", "compat_api_key", True),
+                          ("Model", "compat_model", False)],
+}
+
+# Options each goal pre-enables (merged into cfg on Finish).
+_WIZARD_USECASE_OPTS = {
+    "study":    {"include_images": True, "page_separator": True,
+                 "pp_strip_headers_footers": True, "math_mode": False},
+    "convert":  {"include_images": True, "page_separator": True},
+    "tables":   {"include_images": True, "page_separator": True,
+                 "plumber_tables_enabled": True},
+    "research": {"include_images": True, "page_separator": True,
+                 "math_mode": True},
+}
+
+# Page each goal lands on after finishing.
+_WIZARD_USECASE_GOTO = {
+    "study": "courses", "convert": "convert",
+    "tables": "convert", "research": "convert",
+}
+
+
+class _WizUseCasePage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("What do you want to do?")
+        self.setSubTitle("Pick a goal — I'll set up the right engine and options.")
+        v = QVBoxLayout(self)
+        self._group = QButtonGroup(self)
+        self._by_id: dict[int, str] = {}
+        for i, (uid, title, desc) in enumerate(_WIZARD_USE_CASES):
+            rb = QRadioButton(title)
+            f = rb.font(); f.setBold(True); rb.setFont(f)
+            v.addWidget(rb)
+            hint = QLabel(desc)
+            hint.setWordWrap(True)
+            hint.setObjectName("Hint")
+            hint.setContentsMargins(28, 0, 0, 10)
+            v.addWidget(hint)
+            self._group.addButton(rb, i)
+            self._by_id[i] = uid
+            if uid == "convert":
+                rb.setChecked(True)
+        v.addStretch()
+
+    def validatePage(self):
+        self.wizard().use_case = self._by_id.get(self._group.checkedId(), "convert")
+        return True
+
+
+class _WizEnginePage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("Choose your engine")
+        self.setSubTitle(
+            "Offline engines are free and private. Hosted AI engines need a key."
+        )
+        v = QVBoxLayout(self)
+        self.combo = QComboBox()
+        for eng, label in _WIZARD_ENGINES:
+            self.combo.addItem(label, eng)
+        v.addWidget(self.combo)
+        self.stack = QStackedWidget()
+        v.addWidget(self.stack)
+        self._fields: dict[str, dict[str, QLineEdit]] = {}
+        self._index: dict[str, int] = {}
+        for eng, _label in _WIZARD_ENGINES:
+            w = QWidget()
+            form = QFormLayout(w)
+            specs = _WIZARD_ENGINE_FIELDS[eng]
+            if not specs:
+                form.addRow(QLabel("Runs fully offline — nothing to configure. ✅"))
+            fields: dict[str, QLineEdit] = {}
+            for label, key, pw in specs:
+                le = QLineEdit()
+                if pw:
+                    le.setEchoMode(QLineEdit.EchoMode.Password)
+                form.addRow(label + ":", le)
+                fields[key] = le
+            self._index[eng] = self.stack.addWidget(w)
+            self._fields[eng] = fields
+        self.combo.currentIndexChanged.connect(self._sync_stack)
+        v.addStretch()
+
+    def _sync_stack(self):
+        eng = self.combo.currentData()
+        self.stack.setCurrentIndex(self._index.get(eng, 0))
+
+    def _select(self, eng: str):
+        for i in range(self.combo.count()):
+            if self.combo.itemData(i) == eng:
+                self.combo.setCurrentIndex(i)
+                break
+        self._sync_stack()
+
+    def initializePage(self):
+        cfg = self.wizard().cfg
+        # Fill every engine's fields from cfg.
+        for eng, fields in self._fields.items():
+            for key, le in fields.items():
+                le.setText(str(cfg.get(key, "")))
+        # Default engine from the goal, then the user can override.
+        uc = self.wizard().use_case
+        if uc == "tables":
+            default = "pdfplumber"
+        elif uc == "research":
+            if cfg.get("openai_api_key"):
+                default = "openai"
+            elif cfg.get("anthropic_api_key"):
+                default = "anthropic"
+            else:
+                default = "native"
+        else:
+            default = cfg.get("engine", "native")
+        self._select(default)
+
+    def validatePage(self):
+        cfg = self.wizard().cfg
+        eng = self.combo.currentData()
+        cfg["engine"] = eng
+        for key, le in self._fields.get(eng, {}).items():
+            cfg[key] = le.text().strip()
+        return True
+
+
+class _WizFinishPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle("All set!")
+        v = QVBoxLayout(self)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        v.addWidget(self.summary)
+        self.take_me = QCheckBox("Take me there now")
+        self.take_me.setChecked(True)
+        v.addWidget(self.take_me)
+        v.addStretch()
+
+    def initializePage(self):
+        wiz = self.wizard()
+        title = next((t for u, t, _ in _WIZARD_USE_CASES if u == wiz.use_case),
+                     wiz.use_case)
+        eng_label = next((l for e, l in _WIZARD_ENGINES if e == wiz.cfg.get("engine")),
+                         wiz.cfg.get("engine", "native"))
+        self.summary.setText(
+            f"<p><b>Goal:</b> {title}</p>"
+            f"<p><b>Engine:</b> {eng_label}</p>"
+            "<p>Click <b>Finish</b> — Distilmark will apply these settings and "
+            "open the right place for you.</p>"
+        )
+
+
+class NewProjectWizard(QWizard):
+    """First-run / on-demand setup wizard. Collects a goal + engine, writes the
+    matching settings into ``cfg``, and exposes ``use_case`` / ``take_me_there``
+    so MainWindow can navigate to the right page afterwards."""
+
+    def __init__(self, cfg: dict, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.use_case = "convert"
+        self.take_me_there = True
+        self.setWindowTitle("Distilmark — New project")
+        self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
+        self.setMinimumSize(660, 520)
+        self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
+
+        intro = QWizardPage()
+        intro.setTitle("Welcome to Distilmark")
+        intro.setSubTitle("Turn PDFs into clean, usable Markdown.")
+        iv = QVBoxLayout(intro)
+        blurb = QLabel(
+            "This quick setup picks the best engine and options for what you're "
+            "doing. You can change everything later in the Engines tab, or rerun "
+            "this from the <b>✨ New Project</b> button."
+        )
+        blurb.setWordWrap(True)
+        iv.addWidget(blurb)
+        iv.addStretch()
+        self.addPage(intro)
+        self.addPage(_WizUseCasePage())
+        self.addPage(_WizEnginePage())
+        self._finish = _WizFinishPage()
+        self.addPage(self._finish)
+
+    def accept(self):
+        # Merge the goal's recommended options, mark the wizard done, persist.
+        self.cfg.update(_WIZARD_USECASE_OPTS.get(self.use_case, {}))
+        self.cfg["wizard_completed"] = True
+        self.take_me_there = self._finish.take_me.isChecked()
+        config.save(self.cfg)
+        super().accept()
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -3292,6 +3558,15 @@ class MainWindow(QMainWindow):
         # Big clickable brand block (logo + wordmark + tagline) — opens the repo.
         self.brand_btn = _BrandButton(self.cfg)
         sb.addWidget(self.brand_btn)
+        sb.addSpacing(10)
+
+        # Prominent CTA: relaunch the guided setup wizard anytime.
+        self.new_project_btn = QPushButton("  ✨  New Project")
+        self.new_project_btn.setObjectName("Primary")
+        self.new_project_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_project_btn.setToolTip("Guided setup: pick a goal and engine")
+        self.new_project_btn.clicked.connect(lambda: self._open_new_project_wizard())
+        sb.addWidget(self.new_project_btn)
         # Spacer pushes the NAVIGATION section down to breathe under the logo.
         sb.addSpacing(14)
 
@@ -3386,6 +3661,39 @@ class MainWindow(QMainWindow):
         for i, b in enumerate(self.nav_buttons):
             b.setChecked(i == idx)
 
+    # ---- setup wizard ----
+    def showEvent(self, event):
+        """Offer the setup wizard on the very first launch (once the window is
+        actually visible — i.e. after the splash has revealed it)."""
+        super().showEvent(event)
+        if getattr(self, "_first_run_checked", False):
+            return
+        self._first_run_checked = True
+        if not self.cfg.get("wizard_completed", False):
+            QTimer.singleShot(
+                300, lambda: self._open_new_project_wizard(first_run=True)
+            )
+
+    def _open_new_project_wizard(self, first_run: bool = False):
+        wiz = NewProjectWizard(self.cfg, self)
+        if wiz.exec():
+            # cfg was updated + saved by the wizard; reflect it on the Convert page.
+            self.convert_page.apply_cfg()
+            goto = _WIZARD_USECASE_GOTO.get(wiz.use_case, "convert")
+            if not wiz.take_me_there:
+                self.statusBar().showMessage("Setup saved. ✅", 4000)
+                return
+            if goto == "courses":
+                self._switch(1)
+                self.courses_page._new_course()
+            else:
+                self._switch(0)
+                self.convert_page.pick_files()
+        elif first_run:
+            # Cancelled the first-run wizard — don't nag on every launch.
+            self.cfg["wizard_completed"] = True
+            config.save(self.cfg)
+
     # ---- collapsible sidebar ----
     def _sidebar_icon_color(self) -> str:
         # PyDracula icon tone (light grey on dark surface, slate on paper).
@@ -3406,6 +3714,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setFixedWidth(56 if collapsed else 238)
         # Hide the text-heavy bits when collapsed; show compact icon rail instead.
         self.brand_btn.setVisible(not collapsed)
+        self.new_project_btn.setVisible(not collapsed)
         self.nav_section.setVisible(not collapsed)
         self.theme_section.setVisible(not collapsed)
         self.theme_wrap.setVisible(not collapsed)
