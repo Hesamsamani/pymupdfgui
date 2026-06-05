@@ -409,6 +409,118 @@ def _icon_folder(color: str = "#f97316") -> QIcon:
     return QIcon(pm)
 
 
+def _icon_magnifier(color: str, sign: int) -> QIcon:
+    """A magnifying glass with a +, − or nothing inside.
+
+    ``sign``  1 → zoom-in (＋),  -1 → zoom-out (−),  0 → plain glass (reset)."""
+    pm = QPixmap(28, 28)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(color), 2.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(QRectF(5, 5, 13, 13))       # lens
+    p.drawLine(17, 17, 23, 23)                 # handle
+    if sign != 0:
+        p.drawLine(8, 11, 15, 11)              # minus / horizontal of plus
+    if sign > 0:
+        p.drawLine(11, 8, 11, 15)              # vertical of plus
+    p.end()
+    return QIcon(pm)
+
+
+def _icon_reset(color: str) -> QIcon:
+    """A circular reset arrow — 'reset zoom to 100%'."""
+    pm = QPixmap(28, 28)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(color), 2.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawArc(QRectF(6, 6, 16, 16), 60 * 16, 280 * 16)   # almost-full circle
+    arrow = QPainterPath()                                 # arrowhead at the gap
+    arrow.moveTo(20, 4)
+    arrow.lineTo(21, 11)
+    arrow.lineTo(15, 8)
+    arrow.closeSubpath()
+    p.fillPath(arrow, QColor(color))
+    p.end()
+    return QIcon(pm)
+
+
+def _icon_chevron(color: str, direction: str) -> QIcon:
+    """Single chevron — 'direction' is 'left' or 'right'."""
+    pm = QPixmap(28, 28)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(color), 2.2))
+    if direction == "left":
+        p.drawLine(17, 8, 11, 14)
+        p.drawLine(11, 14, 17, 20)
+    else:
+        p.drawLine(11, 8, 17, 14)
+        p.drawLine(17, 14, 11, 20)
+    p.end()
+    return QIcon(pm)
+
+
+_NAV_LABELS = ["Convert", "Courses", "Preview", "Engines", "History", "About"]
+
+
+def _icon_nav(color: str, kind: str) -> QIcon:
+    """Tiny line-art icons for collapsed-sidebar nav items."""
+    pm = QPixmap(28, 28)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(color), 2.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "Convert":
+        # arrow into a doc
+        p.drawRoundedRect(QRectF(11, 5, 12, 18), 2, 2)
+        p.drawLine(4, 14, 11, 14)
+        p.drawLine(8, 11, 11, 14)
+        p.drawLine(8, 17, 11, 14)
+    elif kind == "Courses":
+        # stacked books
+        p.drawRoundedRect(QRectF(5, 7, 18, 4), 1, 1)
+        p.drawRoundedRect(QRectF(5, 13, 18, 4), 1, 1)
+        p.drawRoundedRect(QRectF(5, 19, 18, 4), 1, 1)
+    elif kind == "Preview":
+        # eye
+        path = QPainterPath()
+        path.moveTo(4, 14)
+        path.quadTo(14, 4, 24, 14)
+        path.quadTo(14, 24, 4, 14)
+        p.drawPath(path)
+        p.drawEllipse(QRectF(10, 10, 8, 8))
+    elif kind == "Engines":
+        # gear
+        p.drawEllipse(QRectF(9, 9, 10, 10))
+        for ang in (0, 60, 120, 180, 240, 300):
+            import math
+            r1, r2 = 6.5, 9.5
+            x1 = 14 + r1 * math.cos(math.radians(ang))
+            y1 = 14 + r1 * math.sin(math.radians(ang))
+            x2 = 14 + r2 * math.cos(math.radians(ang))
+            y2 = 14 + r2 * math.sin(math.radians(ang))
+            p.drawLine(int(x1), int(y1), int(x2), int(y2))
+    elif kind == "History":
+        # clock
+        p.drawEllipse(QRectF(5, 5, 18, 18))
+        p.drawLine(14, 14, 14, 8)
+        p.drawLine(14, 14, 19, 16)
+    elif kind == "About":
+        # info i
+        p.drawEllipse(QRectF(5, 5, 18, 18))
+        p.drawLine(14, 11, 14, 19)
+        p.drawPoint(14, 8)
+        p.drawLine(14, 7, 14, 9)
+    p.end()
+    return QIcon(pm)
+
+
 # ---------------------------------------------------------------------------
 # Convert page
 # ---------------------------------------------------------------------------
@@ -1833,15 +1945,22 @@ class HistoryPage(QWidget):
 # ---------------------------------------------------------------------------
 
 class PreviewPage(QWidget):
-    def __init__(self, parent=None):
+    _MD_BASE_PX = 13   # matches the global font-size in styles.py
+
+    def __init__(self, cfg: dict | None = None, parent=None):
         super().__init__(parent)
+        self.cfg = cfg or {}
         self._pdf_path: str | None = None
         self._page_index = 0
         self._page_count = 0
         self._data: dict | None = None
-        self._zoom = 1.0          # PDF render scale factor
+        self._zoom = 1.0          # PDF render scale factor (also scales the MD)
         self._sync = False        # PDF↔MD page sync toggle
         self._build()
+        self.refresh_theme()
+
+    def _icon_color(self) -> str:
+        return "#cfd3dc" if self.cfg.get("theme", "dark") != "light" else "#3a3f4b"
 
     def _build(self):
         layout = QVBoxLayout(self)
@@ -1875,27 +1994,30 @@ class PreviewPage(QWidget):
         self.next_btn.clicked.connect(self._next_page)
         self.page_label = QLabel("—")
         self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        # Zoom controls
-        self.zoom_out_btn = QPushButton("－")
+        # Zoom controls (icons painted in refresh_theme so they track the theme)
+        self.zoom_out_btn = QPushButton()
         self.zoom_out_btn.setObjectName("Ghost")
         self.zoom_out_btn.setToolTip("Zoom out (Ctrl + −)")
         self.zoom_out_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.zoom_out_btn.setFixedWidth(34)
+        self.zoom_out_btn.setIconSize(QSize(20, 20))
         self.zoom_out_btn.clicked.connect(lambda: self._set_zoom(self._zoom / 1.25))
         self.zoom_label = QLabel("100%")
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.zoom_label.setFixedWidth(52)
-        self.zoom_in_btn = QPushButton("＋")
+        self.zoom_in_btn = QPushButton()
         self.zoom_in_btn.setObjectName("Ghost")
         self.zoom_in_btn.setToolTip("Zoom in (Ctrl + +)")
         self.zoom_in_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.zoom_in_btn.setFixedWidth(34)
+        self.zoom_in_btn.setIconSize(QSize(20, 20))
         self.zoom_in_btn.clicked.connect(lambda: self._set_zoom(self._zoom * 1.25))
-        self.zoom_reset_btn = QPushButton("⤺")
+        self.zoom_reset_btn = QPushButton()
         self.zoom_reset_btn.setObjectName("Ghost")
         self.zoom_reset_btn.setToolTip("Reset zoom (Ctrl + 0)")
         self.zoom_reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.zoom_reset_btn.setFixedWidth(34)
+        self.zoom_reset_btn.setIconSize(QSize(20, 20))
         self.zoom_reset_btn.clicked.connect(lambda: self._set_zoom(1.0))
         # Live PDF↔MD sync toggle
         self.sync_btn = QPushButton("🔗 Sync")
@@ -2011,6 +2133,7 @@ class PreviewPage(QWidget):
             row.addWidget(self._edit_status); row.addWidget(save_btn)
             sv.addLayout(row)
             self.tabs.addTab(src_widget, "Source / Edit")
+        self._apply_md_zoom()
 
     def _save_edits(self):
         if not (self._editor_source and self._editor_output):
@@ -2049,6 +2172,7 @@ class PreviewPage(QWidget):
         live.setOpenExternalLinks(True)
         self._rendered_browsers[0] = live
         self.tabs.addTab(live, "🟢 Live")
+        self._apply_md_zoom()
 
     # Streaming hook: append a chunk of tokens to the most recent Rendered tab.
     def append_stream(self, page_idx: int, chunk: str):
@@ -2113,10 +2237,28 @@ class PreviewPage(QWidget):
     # ---- zoom ----
     def _set_zoom(self, z: float):
         self._zoom = max(0.25, min(5.0, z))
+        self.zoom_label.setText(f"{int(self._zoom * 100)}%")
         self._render_pdf_page()
+        self._apply_md_zoom()
+
+    def _apply_md_zoom(self):
+        """Scale the rendered Markdown text alongside the PDF. A per-widget
+        stylesheet beats the global ``* { font-size: 13px }`` rule in styles.py,
+        and it survives re-renders (setMarkdown keeps the widget stylesheet)."""
+        pt = max(6, round(self._MD_BASE_PX * self._zoom))
+        for br in (getattr(self, "_rendered_browsers", {}) or {}).values():
+            br.setStyleSheet(f"font-size: {pt}px;")
+
+    def refresh_theme(self):
+        """Repaint the icon buttons in the current theme's colour. Called on
+        construction and whenever the app theme changes."""
+        c = self._icon_color()
+        self.zoom_out_btn.setIcon(_icon_magnifier(c, -1))
+        self.zoom_in_btn.setIcon(_icon_magnifier(c, 1))
+        self.zoom_reset_btn.setIcon(_icon_reset(c))
 
     def wheelEvent(self, event):
-        # Ctrl + mouse wheel zooms the PDF, matching common viewer UX.
+        # Ctrl + mouse wheel zooms the PDF + Markdown, matching common viewer UX.
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self._set_zoom(self._zoom * (1.25 if event.angleDelta().y() > 0 else 1 / 1.25))
             event.accept()
@@ -2760,12 +2902,26 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         # Sidebar
-        sidebar = QFrame()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(238)
-        sb = QVBoxLayout(sidebar)
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(238)
+        sb = QVBoxLayout(self.sidebar)
         sb.setContentsMargins(0, 0, 0, 0)
         sb.setSpacing(0)
+
+        # Collapse / expand toggle — pinned top-right of the sidebar.
+        toggle_row = QHBoxLayout()
+        toggle_row.setContentsMargins(8, 8, 8, 0)
+        toggle_row.addStretch()
+        self.collapse_btn = QPushButton()
+        self.collapse_btn.setObjectName("Ghost")
+        self.collapse_btn.setFixedSize(30, 26)
+        self.collapse_btn.setIconSize(QSize(20, 20))
+        self.collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.collapse_btn.setToolTip("Collapse sidebar (Ctrl+B)")
+        self.collapse_btn.clicked.connect(self._toggle_sidebar)
+        toggle_row.addWidget(self.collapse_btn)
+        sb.addLayout(toggle_row)
 
         # Big clickable brand block (logo + wordmark + tagline) — opens the repo.
         self.brand_btn = _BrandButton(self.cfg)
@@ -2773,9 +2929,9 @@ class MainWindow(QMainWindow):
         # Spacer pushes the NAVIGATION section down to breathe under the logo.
         sb.addSpacing(14)
 
-        section = QLabel("NAVIGATION")
-        section.setObjectName("SectionLabel")
-        sb.addWidget(section)
+        self.nav_section = QLabel("NAVIGATION")
+        self.nav_section.setObjectName("SectionLabel")
+        sb.addWidget(self.nav_section)
 
         self.nav_buttons: list[QPushButton] = []
         for label, idx in [("Convert", 0), ("Courses", 1), ("Preview", 2), ("Engines", 3), ("History", 4), ("About", 5)]:
@@ -2790,9 +2946,9 @@ class MainWindow(QMainWindow):
 
         sb.addStretch()
 
-        section2 = QLabel("THEME")
-        section2.setObjectName("SectionLabel")
-        sb.addWidget(section2)
+        self.theme_section = QLabel("THEME")
+        self.theme_section.setObjectName("SectionLabel")
+        sb.addWidget(self.theme_section)
 
         theme_row = QHBoxLayout()
         theme_row.setContentsMargins(8, 4, 8, 12)
@@ -2801,11 +2957,12 @@ class MainWindow(QMainWindow):
         self.theme_combo.setCurrentText(self.cfg.get("theme", "dark"))
         self.theme_combo.currentTextChanged.connect(self._on_theme)
         theme_row.addWidget(self.theme_combo)
-        wrap = QWidget()
-        wrap.setLayout(theme_row)
-        sb.addWidget(wrap)
+        self.theme_wrap = QWidget()
+        self.theme_wrap.setLayout(theme_row)
+        sb.addWidget(self.theme_wrap)
 
-        root.addWidget(sidebar)
+        root.addWidget(self.sidebar)
+        self._sidebar_collapsed = False
 
         # Pages stack
         self.stack = QStackedWidget()
@@ -2814,7 +2971,7 @@ class MainWindow(QMainWindow):
 
         self.convert_page = ConvertPage(self.cfg, status)
         self.courses_page = CoursesPage(self.cfg, status)
-        self.preview_page = PreviewPage()
+        self.preview_page = PreviewPage(self.cfg)
         self.settings_page = SettingsPage(self.cfg)
         self.history_page = HistoryPage()
         self.about_page = AboutPage()
@@ -2842,11 +2999,13 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self.stack, 1)
 
-        # ---- Global navigation shortcuts: Ctrl+1..6 ----
+        # ---- Global navigation shortcuts: Ctrl+1..6, Ctrl+B to fold sidebar ----
         from PyQt6.QtGui import QShortcut, QKeySequence
         for i in range(6):
             QShortcut(QKeySequence(f"Ctrl+{i+1}"), self,
                       activated=lambda _i=i: self._switch(_i))
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_sidebar)
+        self._refresh_sidebar_icons()
 
         # ---- Folder watcher (auto-import new PDFs) ----
         from PyQt6.QtCore import QFileSystemWatcher, QTimer
@@ -2860,6 +3019,43 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(idx)
         for i, b in enumerate(self.nav_buttons):
             b.setChecked(i == idx)
+
+    # ---- collapsible sidebar ----
+    def _sidebar_icon_color(self) -> str:
+        return "#cfd3dc" if self.cfg.get("theme", "dark") != "light" else "#3a3f4b"
+
+    def _refresh_sidebar_icons(self):
+        """(Re)paint the chevron + per-item nav icons in the current theme."""
+        c = self._sidebar_icon_color()
+        collapsed = getattr(self, "_sidebar_collapsed", False)
+        self.collapse_btn.setIcon(_icon_chevron(c, "right" if collapsed else "left"))
+        if collapsed:
+            for b, label in zip(self.nav_buttons, _NAV_LABELS):
+                b.setIcon(_icon_nav(c, label))
+
+    def _toggle_sidebar(self):
+        self._sidebar_collapsed = not getattr(self, "_sidebar_collapsed", False)
+        collapsed = self._sidebar_collapsed
+        self.sidebar.setFixedWidth(56 if collapsed else 238)
+        # Hide the text-heavy bits when collapsed; show compact icon rail instead.
+        self.brand_btn.setVisible(not collapsed)
+        self.nav_section.setVisible(not collapsed)
+        self.theme_section.setVisible(not collapsed)
+        self.theme_wrap.setVisible(not collapsed)
+        c = self._sidebar_icon_color()
+        for b, label in zip(self.nav_buttons, _NAV_LABELS):
+            if collapsed:
+                b.setText("")
+                b.setIcon(_icon_nav(c, label))
+                b.setToolTip(label)
+            else:
+                b.setIcon(QIcon())
+                b.setText(f"  {label}")
+                b.setToolTip("")
+        self.collapse_btn.setToolTip(
+            "Expand sidebar (Ctrl+B)" if collapsed else "Collapse sidebar (Ctrl+B)"
+        )
+        self._refresh_sidebar_icons()
 
     def _preview_from_course(self, data: dict):
         # Courses page asked to show a converted doc — load it and jump to Preview.
@@ -2936,6 +3132,12 @@ class MainWindow(QMainWindow):
         # a repaint when the theme changes.
         if hasattr(self, "brand_btn"):
             self.brand_btn.update()
+        # Preview's painted icons (zoom/reset) are theme-coloured too.
+        if hasattr(self, "preview_page"):
+            self.preview_page.refresh_theme()
+        # Sidebar collapse chevron + nav icons follow the theme as well.
+        if hasattr(self, "collapse_btn"):
+            self._refresh_sidebar_icons()
 
 
 def main() -> None:
