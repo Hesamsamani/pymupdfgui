@@ -31,6 +31,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller pillow
 
+      - name: Generate multi-resolution icon.ico from icon.png
+        # Same script anyone can run locally — keeps the .ico in sync with
+        # the source artwork without having to commit a regenerated binary.
+        run: python scripts/build_icon.py
+
       - name: Read Distilmark version
         id: version
         shell: bash
@@ -41,6 +46,9 @@ jobs:
           echo "Distilmark version: $v"
 
       - name: Build Distilmark Windows executable
+        # --splash shows the icon while PyInstaller's --onefile bootstrap
+        # unpacks the bundle (otherwise the user clicks the .exe and waits
+        # several seconds with nothing happening).
         run: |
           pyinstaller --noconfirm --onefile --windowed --name Distilmark `
             --collect-all pymupdf `
@@ -48,6 +56,7 @@ jobs:
             --collect-all pdfplumber `
             --add-data "icon.png;." `
             --icon icon.ico `
+            --splash icon.png `
             distilmark_launcher.py
 
       - name: Upload artifact

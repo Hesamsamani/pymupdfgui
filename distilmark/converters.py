@@ -232,11 +232,14 @@ def _extract_images(
             name = f"page{page.number+1}_img{img_index+1}.png"
             path = image_dir / name
             pix.save(str(path))
-            # use relative path so markdown previews work anywhere
+            # URL-encode each path segment so spaces / unicode / parentheses
+            # in the PDF filename don't break the markdown image link in
+            # downstream viewers (browsers, GitHub, Obsidian, Typora…).
+            from urllib.parse import quote
             if image_dir_name:
-                ref = f"./{image_dir_name}/{name}"
+                ref = f"./{quote(image_dir_name)}/{quote(name)}"
             else:
-                ref = path.as_posix()
+                ref = quote(path.as_posix(), safe="/:")
             out.append(f"\n![image]({ref})\n")
         except Exception:
             continue

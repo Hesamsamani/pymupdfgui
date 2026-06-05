@@ -305,8 +305,9 @@ def _brand_pixmap(size: int) -> QPixmap:
 class _BrandButton(QPushButton):
     """A flat clickable brand block: big logo on top, wordmark below.
     Clicking it opens the project repo in the user's browser."""
-    def __init__(self, parent=None):
+    def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
+        self.cfg = cfg  # used to pick text/hover colors per theme
         self.setObjectName("Brand")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFlat(True)
@@ -320,22 +321,28 @@ class _BrandButton(QPushButton):
         QDesktopServices.openUrl(QUrl(REPO_URL))
 
     def paintEvent(self, ev):
-        # Don't call the default QPushButton paint — we render our own.
+        # Render the brand block ourselves so the QSS doesn't fight the
+        # pixmap drawing. We pick colors based on the *configured* theme —
+        # QPalette tracks the OS palette and stays out of sync with our QSS,
+        # so trying to read it here gave wrong colors in light mode.
         from PyQt6.QtGui import QPainter, QFontMetrics, QFont
+        is_dark = (self.cfg.get("theme", "dark") or "dark") != "light"
+        text_color = QColor("#f4f6fa") if is_dark else QColor("#161a26")
+        sub_color = QColor("#6b7280") if is_dark else QColor("#8a90a0")
+        hover_bg = QColor("#11151c") if is_dark else QColor("#eef0f6")
+
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # subtle hover background
         if self.underMouse():
-            p.fillRect(self.rect(), QColor("#11151c"))
+            p.fillRect(self.rect(), hover_bg)
         w = self.width()
-        # logo (centred)
         px = self._pix
         x = (w - px.width()) // 2
         y = 16
         p.drawPixmap(x, y, px)
         # wordmark
-        p.setPen(QColor("#f4f6fa"))
+        p.setPen(text_color)
         f = QFont(); f.setBold(True); f.setPointSize(15)
         p.setFont(f)
         fm = QFontMetrics(f)
@@ -343,7 +350,7 @@ class _BrandButton(QPushButton):
         tw = fm.horizontalAdvance(text)
         p.drawText((w - tw) // 2, y + px.height() + 22, text)
         # subtitle
-        p.setPen(QColor("#6b7280"))
+        p.setPen(sub_color)
         f2 = QFont(); f2.setPointSize(8)
         p.setFont(f2)
         sub = "PDF → Markdown converter"
@@ -2601,7 +2608,7 @@ class MainWindow(QMainWindow):
         sb.setSpacing(0)
 
         # Big clickable brand block (logo + wordmark + tagline) — opens the repo.
-        self.brand_btn = _BrandButton()
+        self.brand_btn = _BrandButton(self.cfg)
         sb.addWidget(self.brand_btn)
         # Spacer pushes the NAVIGATION section down to breathe under the logo.
         sb.addSpacing(14)
@@ -2765,6 +2772,10 @@ class MainWindow(QMainWindow):
             app.setStyleSheet(styles.LIGHT)
         else:
             app.setStyleSheet(styles.DARK)
+        # The brand button paints itself with theme-aware colors and needs
+        # a repaint when the theme changes.
+        if hasattr(self, "brand_btn"):
+            self.brand_btn.update()
 
 
 def main() -> None:
