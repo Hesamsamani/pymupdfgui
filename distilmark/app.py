@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem,
     QInputDialog,
     QHeaderView,
+    QDialog,
 )
 
 from . import config, converters, styles, ollama_manager, exporters, projects
@@ -2314,6 +2315,71 @@ _ROLE_CID = Qt.ItemDataRole.UserRole + 11       # chapter id
 _ROLE_SOURCE = Qt.ItemDataRole.UserRole + 12    # document source path
 
 
+def _safe_dirname(name: str) -> str:
+    """Filesystem-safe slug for a course/chapter name."""
+    import re
+    s = re.sub(r'[\\/:*?"<>|]+', " ", name or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s[:80] or "untitled"
+
+
+class _CourseMarkRunDialog(QDialog):
+    """Runs the CourseMark CLI as a subprocess and streams its output here.
+
+    Distilmark and CourseMark are deliberately decoupled — we shell out to the
+    installed `coursemark` rather than importing it, so the private CourseMark
+    repo never has to be a hard dependency of the public Distilmark."""
+
+    def __init__(self, cmd: list[str], env_overrides: dict, out_dir: Path, parent=None):
+        super().__init__(parent)
+        self._out_dir = out_dir
+        self.setWindowTitle("CourseMark — generating study material")
+        self.resize(720, 460)
+        v = QVBoxLayout(self)
+        head = QLabel("Running CourseMark… you can keep using Distilmark; this "
+                      "uses your own engine, not the Claude limit.")
+        head.setObjectName("H2"); head.setWordWrap(True)
+        v.addWidget(head)
+        self.log = QPlainTextEdit(); self.log.setReadOnly(True)
+        v.addWidget(self.log, 1)
+        row = QHBoxLayout()
+        self.open_btn = QPushButton("Open output"); self.open_btn.setObjectName("Accent")
+        self.open_btn.setEnabled(False)
+        self.open_btn.clicked.connect(lambda: ConvertPage._open_in_file_browser(self._out_dir))
+        self.close_btn = QPushButton("Close"); self.close_btn.setObjectName("Ghost")
+        self.close_btn.clicked.connect(self.reject)
+        row.addWidget(self.open_btn); row.addStretch(); row.addWidget(self.close_btn)
+        v.addLayout(row)
+
+        from PyQt6.QtCore import QProcess, QProcessEnvironment
+        self.proc = QProcess(self)
+        penv = QProcessEnvironment.systemEnvironment()
+        for k, val in env_overrides.items():
+            penv.insert(k, val)
+        self.proc.setProcessEnvironment(penv)
+        self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.proc.readyReadStandardOutput.connect(self._read)
+        self.proc.finished.connect(self._finished)
+        self.proc.errorOccurred.connect(
+            lambda _e: self._append(f"\n✗ Could not start CourseMark: {self.proc.errorString()}"))
+        self._append("$ " + " ".join(cmd) + "\n")
+        self.proc.start(cmd[0], cmd[1:])
+
+    def _read(self):
+        data = bytes(self.proc.readAllStandardOutput()).decode("utf-8", "replace")
+        self._append(data.rstrip("\n"))
+
+    def _append(self, text: str):
+        self.log.appendPlainText(text)
+
+    def _finished(self, code: int, _status):
+        if code == 0:
+            self._append("\n✓ Done. Open the output folder to see your study material.")
+            self.open_btn.setEnabled(True)
+        else:
+            self._append(f"\n✗ CourseMark exited with code {code}. See the log above.")
+
+
 class CoursesPage(QWidget):
     conversion_done = pyqtSignal()
     preview_ready = pyqtSignal(dict)
@@ -2375,6 +2441,8 @@ class CoursesPage(QWidget):
         self.add_pdfs_btn.setObjectName("Ghost")
         self.convert_btn = QPushButton("Convert pending  →")
         self.convert_btn.setObjectName("Primary")
+        self.study_btn = QPushButton("🎓 Study")
+        self.study_btn.setObjectName("Accent")
         self.open_btn = QPushButton("Open output")
         self.open_btn.setObjectName("Ghost")
         self.rename_btn = QPushButton("Rename")
@@ -2385,6 +2453,9 @@ class CoursesPage(QWidget):
             (self.add_chapter_btn, self._add_chapter, "Add a new chapter to this course."),
             (self.add_pdfs_btn, self._add_pdfs, "Add PDF files to the selected chapter."),
             (self.convert_btn, self._convert_pending, "Convert every not-yet-converted document in this course."),
+            (self.study_btn, self._send_to_coursemark,
+             "Send this course's converted Markdown to CourseMark to make "
+             "summaries, flashcards, a quiz and an Obsidian graph."),
             (self.open_btn, self._open_selected_output, "Open the converted Markdown / its folder."),
             (self.rename_btn, self._rename_chapter, "Rename the selected chapter."),
             (self.remove_btn, self._remove_selected, "Remove the selected chapter or document."),
@@ -2398,6 +2469,7 @@ class CoursesPage(QWidget):
         trow.addWidget(self.open_btn)
         trow.addWidget(self.rename_btn)
         trow.addWidget(self.remove_btn)
+        trow.addWidget(self.study_btn)
         trow.addWidget(self.convert_btn)
         layout.addLayout(trow)
 
@@ -2597,6 +2669,113 @@ class CoursesPage(QWidget):
             src = item.data(0, _ROLE_SOURCE)
             projects.remove_document(self._pid, cid, src)
         self._refresh_tree()
+
+    # ---- CourseMark hand-off ----
+    def _coursemark_engine_args(self) -> tuple[str, str, dict]:
+        """Map Distilmark's saved engine settings to CourseMark CLI args.
+        Prefers a hosted key (fast) when present, else falls back to Ollama.
+        Returns (engine, model, env_overrides)."""
+        cfg = self.cfg
+        env: dict[str, str] = {}
+        if cfg.get("openai_api_key"):
+            env["OPENAI_API_KEY"] = cfg["openai_api_key"]
+            return "openai", cfg.get("openai_model", "gpt-4o-mini"), env
+        if cfg.get("anthropic_api_key"):
+            env["ANTHROPIC_API_KEY"] = cfg["anthropic_api_key"]
+            return "anthropic", cfg.get("anthropic_model", "claude-haiku-4-5-20251001"), env
+        env["OLLAMA_URL"] = cfg.get("ollama_url", "http://localhost:11434")
+        return "ollama", cfg.get("ollama_model", "llama3.1"), env
+
+    @staticmethod
+    def _find_coursemark() -> list[str] | None:
+        """Locate a runnable CourseMark CLI: a `coursemark` executable on PATH,
+        or the importable package under the current interpreter. Returns the
+        command prefix (before the `run` subcommand), or None if not installed."""
+        import shutil
+        exe = shutil.which("coursemark")
+        if exe:
+            return [exe]
+        try:
+            import importlib.util
+            if importlib.util.find_spec("coursemark") is not None:
+                return [sys.executable, "-m", "coursemark.cli"]
+        except Exception:
+            pass
+        return None
+
+    def _send_to_coursemark(self):
+        p = self._current_project()
+        if not p:
+            QMessageBox.information(self, "CourseMark", "Create a course first."); return
+
+        # 1) Collect each chapter's converted Markdown into one file per chapter.
+        export_root = config.APP_HOME / "coursemark_export" / _safe_dirname(p["name"])
+        export_root.mkdir(parents=True, exist_ok=True)
+        for old in export_root.glob("*.md"):
+            try: old.unlink()
+            except OSError: pass
+
+        n_chapters = 0
+        for idx, ch in enumerate(p.get("chapters", []), 1):
+            parts = []
+            for d in ch.get("documents", []):
+                out = d.get("output")
+                if d.get("status") == projects.CONVERTED and out and Path(out).exists():
+                    try:
+                        parts.append(Path(out).read_text(encoding="utf-8", errors="replace"))
+                    except OSError:
+                        pass
+            if parts:
+                n_chapters += 1
+                fname = f"{idx:02d} - {_safe_dirname(ch['name'])}.md"
+                (export_root / fname).write_text("\n\n---\n\n".join(parts), encoding="utf-8")
+
+        if n_chapters == 0:
+            QMessageBox.information(
+                self, "CourseMark",
+                "No converted documents in this course yet.\n"
+                "Run “Convert pending →” first, then send to CourseMark.")
+            return
+
+        engine, model, env = self._coursemark_engine_args()
+        out_dir = export_root / "study"
+        runner = self._find_coursemark()
+
+        if runner is None:
+            # CourseMark not installed in this environment — guide the user.
+            cmd = (f'coursemark run "{export_root}" --engine {engine} '
+                   f'--model {model} --context "{p["name"]}" --out "{out_dir}"')
+            box = QMessageBox(self)
+            box.setWindowTitle("CourseMark")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(
+                f"Exported {n_chapters} chapter(s) to:\n{export_root}\n\n"
+                "CourseMark isn’t installed here. Install it, then run:")
+            box.setInformativeText(cmd)
+            open_btn = box.addButton("Open export folder", QMessageBox.ButtonRole.AcceptRole)
+            copy_btn = box.addButton("Copy command", QMessageBox.ButtonRole.ActionRole)
+            box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is copy_btn:
+                QApplication.clipboard().setText(cmd)
+                self.status.showMessage("CourseMark command copied to clipboard.", 4000)
+            elif box.clickedButton() is open_btn:
+                ConvertPage._open_in_file_browser(export_root)
+            return
+
+        if QMessageBox.question(
+            self, "CourseMark",
+            f"Generate study material for {n_chapters} chapter(s) now?\n\n"
+            f"Engine: {engine} · {model}\nOutput: {out_dir}",
+        ) != QMessageBox.StandardButton.Yes:
+            ConvertPage._open_in_file_browser(export_root)
+            return
+
+        # 2) Run CourseMark as a subprocess, streaming its log into a dialog.
+        cmd = runner + ["run", str(export_root), "--engine", engine,
+                        "--model", model, "--context", p["name"], "--out", str(out_dir)]
+        dlg = _CourseMarkRunDialog(cmd, env, out_dir, self)
+        dlg.exec()
 
     # ---- tree rendering ----
     def _refresh_tree(self):

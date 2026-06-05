@@ -11,7 +11,7 @@
   <img alt="qt" src="https://img.shields.io/badge/PyQt6-41CD52?logo=qt&logoColor=white" />
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" />
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="version" src="https://img.shields.io/badge/version-v1.4.0-BD93F9" />
+  <img alt="version" src="https://img.shields.io/badge/version-v1.5.0-BD93F9" />
 </p>
 
 <p>
