@@ -744,6 +744,64 @@ def convert_ollama(
 # OpenAI / OpenAI-compatible
 # ---------------------------------------------------------------------------
 
+def _extract_openai_content(data: dict) -> str:
+    """Pull the assistant text out of a chat-completions response.
+
+    OpenAI-compatible gateways in front of AWS Bedrock (LiteLLM, the Bedrock
+    Access Gateway, etc.) do not all return an identical JSON shape, and on
+    failure they often return an ``error`` object with NO ``choices`` key at
+    all. Blindly indexing ``data["choices"][0]…`` then blows up with an opaque
+    ``KeyError: 'choices'``. Here we surface the backend's real error message
+    and accept the most common non-OpenAI shapes instead.
+    """
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Unexpected response from backend: {data!r}")
+
+    # 1) Explicit error object -> show the backend's own message.
+    err = data.get("error")
+    if err:
+        msg = err.get("message") if isinstance(err, dict) else err
+        raise RuntimeError(f"Backend returned an error: {msg}")
+    if "message" in data and "choices" not in data and isinstance(data.get("message"), str):
+        # Some gateways return a bare {"message": "...", "code": ...} on auth/quota errors.
+        raise RuntimeError(f"Backend returned an error: {data['message']}")
+
+    # 2) Standard OpenAI chat-completions shape.
+    choices = data.get("choices")
+    if choices:
+        msg = choices[0].get("message", {})
+        content = msg.get("content")
+        if isinstance(content, list):  # some servers send content parts
+            content = "".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        if content is not None:
+            return content
+
+    # 3) Native AWS Bedrock Converse shape: {"output":{"message":{"content":[{"text":..}]}}}
+    output = data.get("output")
+    if isinstance(output, dict):
+        parts = output.get("message", {}).get("content", [])
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        if text:
+            return text
+
+    # 4) Anthropic-on-Bedrock shape: {"content":[{"type":"text","text":..}]}
+    if isinstance(data.get("content"), list):
+        text = "".join(
+            p.get("text", "") for p in data["content"] if isinstance(p, dict)
+        )
+        if text:
+            return text
+
+    # Nothing matched — show a trimmed body so the user can see what came back.
+    snippet = json.dumps(data)[:500]
+    raise RuntimeError(
+        "Could not find generated text in the backend response. "
+        f"Is this really an OpenAI-compatible endpoint? Response was: {snippet}"
+    )
+
+
 def convert_openai_compatible(
     pdf_path: Path,
     base_url: str,
@@ -777,9 +835,17 @@ def convert_openai_compatible(
                      "Authorization": f"Bearer {api_key}"},
         )
         if not streaming:
-            with urllib.request.urlopen(req, timeout=600) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"]
+            try:
+                with urllib.request.urlopen(req, timeout=600) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                # Auth/quota/model errors arrive as 4xx/5xx with the real
+                # message in the body — read it instead of a bare HTTP code.
+                detail = e.read().decode("utf-8", "ignore")[:500]
+                raise RuntimeError(
+                    f"Backend returned HTTP {e.code}: {detail or e.reason}"
+                ) from None
+            return _extract_openai_content(data)
         # Streaming: SSE — lines beginning with "data: " carry JSON deltas
         out = []
         with urllib.request.urlopen(req, timeout=600) as resp:
