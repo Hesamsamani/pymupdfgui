@@ -1257,17 +1257,26 @@ class ConvertPage(QWidget):
         )
 
     def pick_files(self):
+        start_dir = self.cfg.get("last_input_dir", str(Path.home()))
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Pick files to convert", str(Path.home()), self._input_filter()
+            self, "Pick files to convert", start_dir, self._input_filter()
         )
+        if files:
+            self.cfg["last_input_dir"] = str(Path(files[0]).parent)
+            from . import config as _cfg
+            _cfg.save(self.cfg)
         for f in files:
             self._add(Path(f))
 
     def pick_folder(self):
+        start_dir = self.cfg.get("last_input_dir", str(Path.home()))
         folder = QFileDialog.getExistingDirectory(
-            self, "Pick folder to scan", str(Path.home())
+            self, "Pick folder to scan", start_dir
         )
         if folder:
+            self.cfg["last_input_dir"] = folder
+            from . import config as _cfg
+            _cfg.save(self.cfg)
             n = self._scan_folder(Path(folder))
             self.status.showMessage(f"Found {n} document(s) in folder.", 4000)
 
@@ -2877,9 +2886,14 @@ class CoursesPage(QWidget):
         cid = self._selected_chapter_id()
         if not cid:
             QMessageBox.information(self, "Courses", "Select a chapter to add PDFs to."); return
+        start_dir = self.cfg.get("last_input_dir", str(Path.home()))
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Add PDFs to chapter", str(Path.home()), "PDF files (*.pdf)"
+            self, "Add PDFs to chapter", start_dir, "PDF files (*.pdf)"
         )
+        if files:
+            self.cfg["last_input_dir"] = str(Path(files[0]).parent)
+            from . import config as _cfg
+            _cfg.save(self.cfg)
         added = 0
         for f in files:
             if projects.add_document(self._pid, cid, f):

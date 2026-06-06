@@ -64,6 +64,7 @@ DEFAULTS: dict[str, Any] = {
     "include_images": True,
     "page_separator": True,
     "last_output_dir": str(Path.home()),
+    "last_input_dir": str(Path.home()),
     # page range (blank = all pages)
     "page_range_from": "",
     "page_range_to": "",

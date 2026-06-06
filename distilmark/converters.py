@@ -1050,7 +1050,7 @@ def _bedrock_invoke(
 
     canonical_request = (
         "POST\n" + canonical_uri + "\n" + "\n"
-        + canonical_headers + signed_headers + "\n" + payload_hash
+        + canonical_headers + "\n" + signed_headers + "\n" + payload_hash
     )
 
     algorithm = "AWS4-HMAC-SHA256"
@@ -1082,10 +1082,24 @@ def _bedrock_invoke(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "ignore")[:500]
-        raise ConversionError(
-            f"AWS Bedrock returned HTTP {e.code}: {detail or e.reason}"
-        ) from None
+        detail = e.read().decode("utf-8", "ignore")[:1000]
+        msg = f"AWS Bedrock returned HTTP {e.code}: {detail or e.reason}"
+        if e.code in (401, 403) and canonical_request:
+            # Include what we actually signed for easier debugging of SigV4 issues.
+            # (The secret key itself is never in the canonical string.)
+            msg += "\n\n[App debug] Canonical request we calculated:\n" + canonical_request
+            # Also show the string-to-sign and the signature *we* produced (for comparison).
+            # This helps distinguish "bad canonical" vs "bad secret key".
+            string_to_sign = (
+                "AWS4-HMAC-SHA256\n" + amz_date + "\n" + credential_scope + "\n"
+                + hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+            )
+            our_signature = hmac.new(
+                signing_key, string_to_sign.encode("utf-8"), hashlib.sha256
+            ).hexdigest()
+            msg += "\n[App debug] String-to-Sign we used:\n" + string_to_sign
+            msg += "\n[App debug] Signature we calculated: " + our_signature
+        raise ConversionError(msg) from None
 
 
 def convert_bedrock(
