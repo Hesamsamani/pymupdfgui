@@ -506,6 +506,44 @@ def _pdfplumber_extract_images_with_y(
     return out
 
 
+def _pdfplumber_extract_tables_with_y(
+    pdf_path: Path,
+    page_index: int,
+    table_settings: dict | None,
+) -> list[str]:
+    """Extract tables for a page using pdfplumber (same engine as the offline
+    pdfplumber path) and return a list of ready-to-use GitHub-flavored markdown
+    table blocks, sorted by their top y position on the page. Used by LLM/vision
+    engines so they can place high-quality extracted tables while still using
+    vision for overall understanding and surrounding text."""
+    out: list[tuple[float, str]] = []
+    try:
+        import pdfplumber  # type: ignore
+    except Exception:
+        return []
+    try:
+        with pdfplumber.open(str(pdf_path)) as doc:
+            if page_index >= len(doc.pages):
+                return []
+            page = doc.pages[page_index]
+            ts = {**_DEFAULT_PDFPLUMBER_TABLE_SETTINGS, **(table_settings or {})}
+            for tbl in (page.find_tables(table_settings=ts) or []):
+                try:
+                    rows = tbl.extract() or []
+                    md = _table_to_md(rows)
+                    if not md:
+                        continue
+                    bbox = getattr(tbl, "bbox", None)
+                    top = float(bbox[1]) if bbox and len(bbox) > 1 else 0.0
+                    out.append((top, "\n" + md + "\n"))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    out.sort(key=lambda t: t[0])
+    return [md for _, md in out]
+
+
 def convert_pdfplumber(
     pdf_path: Path,
     opts: ConvertOptions,
@@ -641,26 +679,33 @@ def _render_page_png_b64(page: pymupdf.Page, dpi: int = 150) -> str:
 
 
 PROMPT = (
-    "Convert this PDF page to clean Markdown. Preserve headings, lists, "
-    "tables (use GitHub-flavored markdown), code blocks, and inline emphasis. "
-    "Do not add commentary. Output only the markdown."
+    "Convert this PDF page to clean, well-structured GitHub-flavored Markdown. "
+    "Preserve headings, bullet and numbered lists, tables (as proper GitHub | markdown tables with alignment), "
+    "code blocks, and inline emphasis. "
+    "Break the text into natural paragraphs separated by blank lines. "
+    "Wrap prose lines to a readable length (roughly 70-100 characters, similar to standard A4/Letter document text) "
+    "so there are no endless long lines. Code blocks and table rows may be longer. "
+    "Follow the visual reading order, column flow, and layout of the provided page image. "
+    "Do not add commentary, explanations, or extra text. Output ONLY the markdown."
 )
 
-# Instruction injected (per-page) for vision LLM engines when precise images
-# were extracted. This is the key to accurate image *positioning* that matches
-# the original PDF layout, instead of dumping full-page screenshots.
-IMAGE_ASSET_INSTRUCTION = (
-    "\n\n### Precise figure / image assets extracted from this page\n"
-    "The PDF page you are looking at contains the following embedded images/figures that have been "
-    "precisely extracted (not full page renders). Their relative markdown links are listed below.\n\n"
-    "RULES FOR IMAGES (critical for layout fidelity):\n"
-    "- Place each image markdown **inline in the output at the exact narrative position** where the visual appears on the page "
-    "  (immediately after the sentence, paragraph or heading that refers to it, following the natural reading order you observe).\n"
-    "- Use the **exact path** provided in the links below. Do not change or omit the (./...png) portion.\n"
-    "- You MAY improve the alt text inside [] to be short, descriptive and URL-safe (use - or _ instead of spaces, e.g. system-architecture-diagram).\n"
-    "- Do not put all images at the top or bottom. Embed them where they belong visually so the rendered Markdown looks like the original page.\n"
-    "- If a visual element on the page has no asset listed, describe it in text.\n\n"
-    "Available image markdowns for this page (embed the matching ones at correct positions):\n"
+# Front-loaded instructions for vision LLM engines. These go *before* the
+# main task so the model treats placement, tables, and formatting as hard
+# requirements rather than after-thoughts (prevents "everything at the end"
+# and endless lines).
+LLM_STRUCTURE_INSTRUCTIONS = (
+    "Follow these strict rules for layout fidelity and readability:\n"
+    "1. IMAGE PLACEMENT (critical): The page contains precisely extracted individual figures/images (not full pages). "
+    "You will be given their exact markdown links below. You MUST insert each one **inline inside the running text** "
+    "at the exact visual/narrative location where the figure appears on the screenshot (right after the sentence or "
+    "paragraph that refers to it). NEVER collect images at the top or very end of the page output. Interleave them.\n"
+    "2. TABLE PLACEMENT (critical): You will also be given high-quality pre-extracted GitHub-flavored markdown tables "
+    "(from structural pdfplumber analysis). Insert each entire table block where the table visually sits on the page. "
+    "Do not move tables to the end.\n"
+    "3. FORMATTING: Produce natural paragraphs separated by blank lines. Wrap ordinary text lines to ~70-100 characters "
+    "so the result looks like clean A4/Letter document text (no endless long lines on any page). Code and table rows can be longer. "
+    "Respect columns and reading order visible in the page image.\n"
+    "4. Only improve alt text in image links (keep paths 100% identical). Output ONLY the final markdown for the page.\n\n"
 )
 
 MATH_PROMPT_ADDITION = (
@@ -697,7 +742,7 @@ def is_likely_scanned(pdf_path: Path, sample_pages: int = 3, threshold: int = 50
 # Generic LLM page runner (sequential or concurrent)
 # ---------------------------------------------------------------------------
 
-PageFn = Callable[[int, str, list[str]], str]  # (page_idx_0based, image_b64, image_markdown_refs_for_page) -> markdown
+PageFn = Callable[[int, str, list[str], list[str]], str]  # (idx, b64, image_refs, table_md_blocks) -> markdown
 
 
 def _run_llm(
@@ -725,10 +770,10 @@ def _run_llm(
     #     using the same _extract_images path as the native/pdfplumber engines.
     #   * Do NOT save or reference full-page screenshots in the output .md
     #     (user explicitly does not want "the whole page image").
-    #   * Pass the list of exact image markdown refs to the per-page call so the
-    #     vision model can embed them at the visually correct positions inside the
-    #     generated markdown (this is what gives layout/position fidelity close to
-    #     the original PDF and to the native engine).
+    #   * Pass the list of exact image markdown refs + any pre-extracted tables
+    #     to the per-page call so the vision model can embed them at the visually
+    #     correct positions (this + the safety post-correction below gives layout
+    #     fidelity close to the original PDF and the native/pdfplumber engines).
     extracted_per_page: dict[int, list[str]] = {}
     if opts.include_images and opts.image_dir is not None:
         opts.image_dir.mkdir(parents=True, exist_ok=True)
@@ -740,6 +785,23 @@ def _run_llm(
 
     doc.close()
 
+    # Also extract high-quality tables via pdfplumber (when the option is enabled).
+    # This lets "online" (LLM/vision) engines benefit from the same excellent
+    # structural table extraction that the offline pdfplumber engine uses, while
+    # the vision model still provides the overall transcription, surrounding text,
+    # and placement decisions ("use the online engine" for understanding + "offline
+    # pdfplumber remains" for table quality).
+    tables_per_page: dict[int, list[str]] = {}
+    if getattr(opts, "plumber_tables_enabled", True):
+        ts = getattr(opts, "plumber_table_settings", None) or {}
+        for page_idx in indices:
+            try:
+                tables_per_page[page_idx] = _pdfplumber_extract_tables_with_y(
+                    pdf_path, page_idx, ts
+                )
+            except Exception:
+                tables_per_page[page_idx] = []
+
     n_total = len(indices)
     results: dict[int, str] = {}
     concurrency = max(1, opts.llm_concurrency)
@@ -750,12 +812,16 @@ def _run_llm(
             if progress:
                 progress(n + 1, n_total, f"Page {i+1}/{total} ({label})")
             refs = extracted_per_page.get(i, [])
-            results[i] = page_fn(i, images[i], refs)
+            tabs = tables_per_page.get(i, [])
+            results[i] = page_fn(i, images[i], refs, tabs)
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         done = 0
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futs = {ex.submit(page_fn, i, images[i], extracted_per_page.get(i, [])): i for i in indices}
+            futs = {
+                ex.submit(page_fn, i, images[i], extracted_per_page.get(i, []), tables_per_page.get(i, [])): i
+                for i in indices
+            }
             try:
                 for fut in as_completed(futs):
                     _check_cancel(opts)
@@ -770,11 +836,52 @@ def _run_llm(
 
     pages = [results[i] for i in indices]
 
-    # No more auto-wrapping with full page images or forced append of individuals.
+    # No more auto-wrapping with full page images.
+    # The model is given precise assets + strong rules. As a safety net for
+    # "images/tables still at the very end", if none of the provided structural
+    # assets appear in the LLM output we force-insert them after the first
+    # paragraph so the final .md has them in the body (much better fidelity
+    # than leaving everything collected at the end of a page section).
+    if any(extracted_per_page.get(i) or tables_per_page.get(i) for i in indices):
+        corrected: list[str] = []
+        for n, i in enumerate(indices):
+            text = pages[n]
+            img_list = extracted_per_page.get(i, []) or []
+            tbl_list = tables_per_page.get(i, []) or []
+            all_assets = img_list + tbl_list
+            if not all_assets:
+                corrected.append(text)
+                continue
+            # Heuristic presence check: look for image filenames or table markers.
+            present = False
+            for a in all_assets:
+                if ".png" in a and ("page" in a or "img" in a):
+                    # crude but effective: does a path-like token from the ref appear?
+                    token = a.split("(")[-1].split(")")[0] if "(" in a else a[:40]
+                    if token and token in text:
+                        present = True
+                        break
+                elif "|" in a and ("---" in a or "---|" in a):
+                    if a[:30] in text or a[-30:] in text:
+                        present = True
+                        break
+            if not present:
+                # Force the precise assets into the body (after first para when possible).
+                assets_joined = "\n\n" + "\n\n".join(all_assets)
+                parts = re.split(r'(\n{2,})', (text or "").strip())
+                if len(parts) >= 3:
+                    text = parts[0] + parts[1] + assets_joined + "".join(parts[2:])
+                else:
+                    text = ((text or "").rstrip() + assets_joined)
+            corrected.append(text)
+        pages = corrected
+
     # The model (when given the precise refs + strong placement rules) is responsible
-    # for putting ![...](correct/path) at the right spots in the text flow.
-    # This + using the same structural extraction as native gives the position
-    # accuracy the user requires.
+    # for putting assets at the right spots. The post-correction above guarantees
+    # they are not stranded at the absolute end when the VLM ignores instructions.
+    # Using the same structural extraction (fitz for images, pdfplumber for tables)
+    # as the native/pdfplumber engines is what delivers the position/accuracy the
+    # user requires.
 
     pages = postprocess(pages, opts)
     return _assemble(pages, opts)
@@ -794,10 +901,15 @@ def convert_ollama(
     base_prompt = _resolve_prompt(opts)
     streaming = opts.stream_cb is not None
 
-    def page_fn(idx: int, img_b64: str, image_refs: list[str]) -> str:
+    def page_fn(idx: int, img_b64: str, image_refs: list[str], table_mds: list[str]) -> str:
         p = base_prompt
+        prefix = LLM_STRUCTURE_INSTRUCTIONS
+        if table_mds:
+            prefix += "Pre-extracted tables (insert these exact blocks where the tables appear visually):\n\n" + "\n\n".join(table_mds) + "\n\n"
         if image_refs:
-            p = base_prompt + IMAGE_ASSET_INSTRUCTION + "\n".join(image_refs) + "\n"
+            prefix += "Precise image assets (insert the links inline at the exact visual locations, improve only the [] alt text, keep (path) identical):\n\n" + "\n".join(image_refs) + "\n\n"
+        if prefix.strip():
+            p = prefix + base_prompt
         payload = {
             "model": model, "prompt": p,
             "images": [img_b64], "stream": streaming,
@@ -907,10 +1019,15 @@ def convert_openai_compatible(
     base_prompt = _resolve_prompt(opts)
     streaming = opts.stream_cb is not None
 
-    def page_fn(idx: int, img_b64: str, image_refs: list[str]) -> str:
+    def page_fn(idx: int, img_b64: str, image_refs: list[str], table_mds: list[str]) -> str:
         p = base_prompt
+        prefix = LLM_STRUCTURE_INSTRUCTIONS
+        if table_mds:
+            prefix += "Pre-extracted tables (insert these exact blocks where the tables appear visually):\n\n" + "\n\n".join(table_mds) + "\n\n"
         if image_refs:
-            p = base_prompt + IMAGE_ASSET_INSTRUCTION + "\n".join(image_refs) + "\n"
+            prefix += "Precise image assets (insert the links inline at the exact visual locations, improve only the [] alt text, keep (path) identical):\n\n" + "\n".join(image_refs) + "\n\n"
+        if prefix.strip():
+            p = prefix + base_prompt
         payload = {
             "model": model,
             "messages": [{
@@ -984,10 +1101,15 @@ def convert_anthropic(
     base_prompt = _resolve_prompt(opts)
     streaming = opts.stream_cb is not None
 
-    def page_fn(idx: int, img_b64: str, image_refs: list[str]) -> str:
+    def page_fn(idx: int, img_b64: str, image_refs: list[str], table_mds: list[str]) -> str:
         p = base_prompt
+        prefix = LLM_STRUCTURE_INSTRUCTIONS
+        if table_mds:
+            prefix += "Pre-extracted tables (insert these exact blocks where the tables appear visually):\n\n" + "\n\n".join(table_mds) + "\n\n"
         if image_refs:
-            p = base_prompt + IMAGE_ASSET_INSTRUCTION + "\n".join(image_refs) + "\n"
+            prefix += "Precise image assets (insert the links inline at the exact visual locations, improve only the [] alt text, keep (path) identical):\n\n" + "\n".join(image_refs) + "\n\n"
+        if prefix.strip():
+            p = prefix + base_prompt
         payload = {
             "model": model, "max_tokens": 4096,
             "messages": [{
@@ -1175,10 +1297,15 @@ def convert_bedrock(
             "Fill them in under Settings → AWS Bedrock."
         )
 
-    def page_fn(idx: int, img_b64: str, image_refs: list[str]) -> str:
+    def page_fn(idx: int, img_b64: str, image_refs: list[str], table_mds: list[str]) -> str:
         p = base_prompt
+        prefix = LLM_STRUCTURE_INSTRUCTIONS
+        if table_mds:
+            prefix += "Pre-extracted tables (insert these exact blocks where the tables appear visually):\n\n" + "\n\n".join(table_mds) + "\n\n"
         if image_refs:
-            p = base_prompt + IMAGE_ASSET_INSTRUCTION + "\n".join(image_refs) + "\n"
+            prefix += "Precise image assets (insert the links inline at the exact visual locations, improve only the [] alt text, keep (path) identical):\n\n" + "\n".join(image_refs) + "\n\n"
+        if prefix.strip():
+            p = prefix + base_prompt
         payload = {
             "messages": [{
                 "role": "user",
